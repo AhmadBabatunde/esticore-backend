@@ -1,0 +1,35 @@
+# Core FastAPI dependencies
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Authentication dependencies
+email-validator
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+
+# LangChain and AI dependencies  
+langchain
+langchain-openai
+langchain-community
+langgraph
+
+# PDF and image processing
+PyPDF2
+pypdf
+pdf2image
+Pillow
+opencv-python
+
+# Vector database
+faiss-cpu
+
+# Environment variables
+python-dotenv
+
+# Image processing and annotation
+# inference-sdk  # You may need to install this separately
+
+# Other utilities
+requests

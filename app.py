@@ -1,0 +1,53 @@
+"""
+Main application file for the Floor Plan Agent API
+Modularized version of the original application
+"""
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+# Import configuration and initialize settings
+from modules.config import settings
+
+# Import all routers
+from modules.auth import auth_router
+from modules.pdf_processing import pdf_router
+from modules.projects import project_router
+from modules.api import agent_router, general_router
+
+def create_app() -> FastAPI:
+    """Create and configure the FastAPI application"""
+    
+    # Validate settings
+    settings.validate()
+    
+    # Create FastAPI app
+    app = FastAPI(
+        title=settings.APP_NAME,
+        version=settings.VERSION,
+        description="AI-powered floor plan annotation and document analysis system with unified workflows"
+    )
+    
+    # Add CORS middleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    
+    # Include routers
+    app.include_router(general_router)  # General endpoints (root, health, download)
+    app.include_router(auth_router)     # Authentication endpoints
+    app.include_router(pdf_router)      # Document processing endpoints
+    app.include_router(project_router)  # Project management endpoints
+    app.include_router(agent_router)    # Agent workflow endpoints
+    
+    return app
+
+# Create the application instance
+app = create_app()
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host=settings.HOST, port=settings.PORT)
