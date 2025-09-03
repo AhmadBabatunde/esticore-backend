@@ -29,7 +29,7 @@ faiss-cpu
 python-dotenv
 
 # Image processing and annotation
-# inference-sdk  # You may need to install this separately
+inference-sdk  # You may need to install this separately
 
 # Other utilities
 requests
