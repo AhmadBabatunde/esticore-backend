@@ -29,8 +29,7 @@ faiss-cpu
 python-dotenv
 
 # Image processing and annotation
---extra-index-url https://pypi.roboflow.com
-inference-sdk  # You may need to install this separately
+inference-sdk
 
 # Other utilities
 requests
