@@ -27,16 +27,14 @@ def create_app() -> FastAPI:
         description="AI-powered floor plan annotation and document analysis system with unified workflows"
     )
     
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",     # Local dev
-        "https://esticore.vercel.app" # Production frontend
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    # Add CORS middleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000", "https://esticore.vercel.app"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     
     # Include routers
     app.include_router(general_router)  # General endpoints (root, health, download)
