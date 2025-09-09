@@ -95,6 +95,31 @@ class PDFProcessor:
             "chunks_indexed": n_chunks
         }
     
+    def upload_and_index_multiple_pdfs(self, file_contents: List[bytes], filenames: List[str]) -> List[dict]:
+        """Upload and index multiple PDF files"""
+        results = []
+        errors = []
+        
+        for i, (file_content, filename) in enumerate(zip(file_contents, filenames)):
+            try:
+                result = self.upload_and_index_pdf(file_content, filename)
+                results.append(result)
+            except Exception as e:
+                error_info = {
+                    "filename": filename,
+                    "error": str(e),
+                    "index": i
+                }
+                errors.append(error_info)
+        
+        return {
+            "successful_uploads": results,
+            "failed_uploads": errors,
+            "total_files": len(file_contents),
+            "successful_count": len(results),
+            "failed_count": len(errors)
+        }
+    
     def get_document_info(self, doc_id: str) -> dict:
         """Get document information"""
         reg = load_registry()
