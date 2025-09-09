@@ -3,6 +3,7 @@ Database models and operations for the Floor Plan Agent API
 """
 import sqlite3
 import hashlib
+import json
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 from datetime import datetime
@@ -27,7 +28,7 @@ class Project:
     name: str = ""
     description: str = ""
     user_id: int = 0
-    doc_id: Optional[str] = None  # Associated document ID
+    doc_ids: Optional[List[str]] = None  # Associated document IDs as list
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -83,20 +84,31 @@ class DatabaseManager:
             )
         """)
         
-        # Create projects table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS projects(
-                id INTEGER PRIMARY KEY,
-                project_id TEXT UNIQUE NOT NULL,
-                name TEXT NOT NULL,
-                description TEXT,
-                user_id INTEGER NOT NULL,
-                doc_id TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES userdata (id)
-            )
-        """)
+        # Create projects table (handle migration from doc_id to doc_ids)
+        # First check if projects table exists and what columns it has
+        cur.execute("PRAGMA table_info(projects)")
+        columns = [row[1] for row in cur.fetchall()]
+        
+        if not columns:  # Table doesn't exist, create new one
+            cur.execute("""
+                CREATE TABLE projects(
+                    id INTEGER PRIMARY KEY,
+                    project_id TEXT UNIQUE NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    user_id INTEGER NOT NULL,
+                    doc_ids TEXT,  -- Store multiple document IDs as JSON array
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id)
+                )
+            """)
+        elif 'doc_id' in columns and 'doc_ids' not in columns:
+            # Migrate from old schema (doc_id) to new schema (doc_ids)
+            self._migrate_projects_schema(cur)
+        elif 'doc_ids' not in columns:
+            # Add doc_ids column if it doesn't exist
+            cur.execute("ALTER TABLE projects ADD COLUMN doc_ids TEXT")
         
         # Create test user if not exists
         cur.execute("SELECT * FROM userdata WHERE email = ?", ("test@example.com",))
@@ -109,6 +121,39 @@ class DatabaseManager:
         
         conn.commit()
         conn.close()
+    
+    def _migrate_projects_schema(self, cur):
+        """Migrate projects table from doc_id to doc_ids schema"""
+        # Create new table with updated schema
+        cur.execute("""
+            CREATE TABLE projects_new(
+                id INTEGER PRIMARY KEY,
+                project_id TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                user_id INTEGER NOT NULL,
+                doc_ids TEXT,  -- Store multiple document IDs as JSON array
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES userdata (id)
+            )
+        """)
+        
+        # Migrate data from old table to new table
+        cur.execute("""
+            INSERT INTO projects_new (id, project_id, name, description, user_id, doc_ids, created_at, updated_at)
+            SELECT id, project_id, name, description, user_id, 
+                   CASE 
+                       WHEN doc_id IS NOT NULL THEN '["' || doc_id || '"]'
+                       ELSE NULL
+                   END as doc_ids,
+                   created_at, updated_at
+            FROM projects
+        """)
+        
+        # Drop old table and rename new one
+        cur.execute("DROP TABLE projects")
+        cur.execute("ALTER TABLE projects_new RENAME TO projects")
     
     def create_user(self, firstname: str, lastname: str, email: str, password: str, google_id: str = None) -> int:
         """Create a new user"""
@@ -306,15 +351,20 @@ class DatabaseManager:
             conn.close()
     
     # Project management methods
-    def create_project(self, project_id: str, name: str, description: str, user_id: int, doc_id: str = None) -> int:
+    def create_project(self, project_id: str, name: str, description: str, user_id: int, doc_ids: Optional[List[str]] = None) -> int:
         """Create a new project"""
         conn = self.get_connection()
         cur = conn.cursor()
         
         try:
+            # Convert doc_ids list to JSON string if present
+            doc_ids_str = None
+            if doc_ids and len(doc_ids) > 0:
+                doc_ids_str = json.dumps(doc_ids)
+            
             cur.execute(
-                "INSERT INTO projects (project_id, name, description, user_id, doc_id) VALUES (?, ?, ?, ?, ?)",
-                (project_id, name, description, user_id, doc_id)
+                "INSERT INTO projects (project_id, name, description, user_id, doc_ids) VALUES (?, ?, ?, ?, ?)",
+                (project_id, name, description, user_id, doc_ids_str)
             )
             conn.commit()
             
@@ -326,26 +376,54 @@ class DatabaseManager:
         finally:
             conn.close()
     
-    def get_project_by_id(self, project_id: str) -> Optional[Project]:
-        """Get project by project_id"""
+    def update_project_document(self, project_id: str, doc_ids: List[str]) -> bool:
+        """Update the document IDs for a project"""
         conn = self.get_connection()
         cur = conn.cursor()
         
         try:
+            # Convert doc_ids list to JSON string
+            doc_ids_str = json.dumps(doc_ids)
+            
             cur.execute(
-                "SELECT id, project_id, name, description, user_id, doc_id, created_at, updated_at FROM projects WHERE project_id = ?",
-                (project_id,)
+                "UPDATE projects SET doc_ids = ? WHERE project_id = ?",
+                (doc_ids_str, project_id)
             )
+            conn.commit()
+            return cur.rowcount > 0
+            
+        finally:
+            conn.close()
+    
+    def get_project_by_id(self, project_id: str) -> Optional[Project]:
+        """Get project by project ID"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        
+        try:
+            cur.execute("""
+                SELECT id, project_id, name, description, user_id, doc_ids, created_at, updated_at 
+                FROM projects 
+                WHERE project_id = ?
+            """, (project_id,))
             row = cur.fetchone()
             
             if row:
+                # Parse doc_ids from JSON string if present
+                doc_ids = None
+                if row[5]:
+                    try:
+                        doc_ids = json.loads(row[5])
+                    except json.JSONDecodeError:
+                        doc_ids = [row[5]]  # Fallback to old single doc_id format
+                
                 return Project(
                     id=row[0],
                     project_id=row[1],
                     name=row[2],
                     description=row[3],
                     user_id=row[4],
-                    doc_id=row[5],
+                    doc_ids=doc_ids,
                     created_at=row[6],
                     updated_at=row[7]
                 )
@@ -361,39 +439,34 @@ class DatabaseManager:
         
         try:
             cur.execute(
-                "SELECT id, project_id, name, description, user_id, doc_id, created_at, updated_at FROM projects WHERE user_id = ? ORDER BY created_at DESC",
+                "SELECT id, project_id, name, description, user_id, doc_ids, created_at, updated_at FROM projects WHERE user_id = ? ORDER BY created_at DESC",
                 (user_id,)
             )
             rows = cur.fetchall()
             
-            return [
-                Project(
+            result = []
+            for row in rows:
+                # Parse doc_ids from JSON string if present
+                doc_ids = None
+                if row[5]:
+                    try:
+                        doc_ids = json.loads(row[5])
+                    except json.JSONDecodeError:
+                        doc_ids = [row[5]]  # Fallback to old single doc_id format
+                
+                result.append(Project(
                     id=row[0],
                     project_id=row[1],
                     name=row[2],
                     description=row[3],
                     user_id=row[4],
-                    doc_id=row[5],
+                    doc_ids=doc_ids,
                     created_at=row[6],
                     updated_at=row[7]
-                )
-                for row in rows
-            ]
+                ))
             
-        finally:
-            conn.close()
-    
-    def update_project_document(self, project_id: str, doc_id: str):
-        """Associate a document with a project"""
-        conn = self.get_connection()
-        cur = conn.cursor()
-        
-        try:
-            cur.execute(
-                "UPDATE projects SET doc_id = ?, updated_at = CURRENT_TIMESTAMP WHERE project_id = ?",
-                (doc_id, project_id)
-            )
-            conn.commit()
+            return result
+            
         finally:
             conn.close()
     

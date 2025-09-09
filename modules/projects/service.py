@@ -14,59 +14,90 @@ class ProjectService:
     
     def create_project_with_pdf(self, name: str, description: str, user_id: int, 
                                file_content: bytes, filename: str) -> Dict[str, Any]:
-        """Create a new project with an associated PDF document"""
+        """Create a new project with an associated PDF document (backward compatibility)"""
+        return self.create_project_with_pdfs(name, description, user_id, [file_content], [filename])
+    
+    def create_project_without_pdf(self, name: str, description: str, user_id: int) -> Dict[str, Any]:
+        """Create a new project without an initial PDF document (backward compatibility)"""
+        return self.create_project_without_pdfs(name, description, user_id)
+    
+    def create_project_with_pdfs(self, name: str, description: str, user_id: int, 
+                               file_contents: List[bytes], filenames: List[str]) -> Dict[str, Any]:
+        """Create a new project with one or more associated PDF documents"""
         # Generate unique project ID
         project_id = uuid.uuid4().hex
         
+        print(f"Debug: create_project_with_pdfs called with {len(file_contents)} files")
+        print(f"Debug: filenames: {filenames}")
+        
         try:
-            # First upload and index the PDF
-            pdf_result = pdf_processor.upload_and_index_pdf(file_content, filename)
-            doc_id = pdf_result["doc_id"]
+            # First upload and index all PDFs
+            doc_ids = []
+            document_info = []
             
-            # Create the project with the document ID
+            for i, (file_content, filename) in enumerate(zip(file_contents, filenames)):
+                print(f"Debug: processing file {i+1}/{len(file_contents)}: {filename}")
+                print(f"Debug: file content size: {len(file_content)} bytes")
+                
+                pdf_result = pdf_processor.upload_and_index_pdf(file_content, filename)
+                print(f"Debug: PDF processed successfully, doc_id: {pdf_result['doc_id']}")
+                
+                doc_ids.append(pdf_result["doc_id"])
+                document_info.append({
+                    "doc_id": pdf_result["doc_id"],
+                    "filename": pdf_result["filename"],
+                    "pages": pdf_result["pages"],
+                    "chunks_indexed": pdf_result["chunks_indexed"]
+                })
+            
+            print(f"Debug: All PDFs processed. doc_ids: {doc_ids}")
+            
+            # Create the project with the document IDs
             db_project_id = self.db.create_project(
                 project_id=project_id,
                 name=name,
                 description=description,
                 user_id=user_id,
-                doc_id=doc_id
+                doc_ids=doc_ids
             )
+            
+            print(f"Debug: Project created in database with ID: {db_project_id}")
             
             if db_project_id is None:
                 raise ValueError("Failed to create project in database")
             
             # Return comprehensive project information
-            return {
+            result = {
                 "project_id": project_id,
                 "name": name,
                 "description": description,
                 "user_id": user_id,
-                "document": {
-                    "doc_id": doc_id,
-                    "filename": pdf_result["filename"],
-                    "pages": pdf_result["pages"],
-                    "chunks_indexed": pdf_result["chunks_indexed"]
-                },
+                "documents": document_info,
                 "created_at": "just created"
             }
             
+            print(f"Debug: Returning result: {result}")
+            return result
+            
         except Exception as e:
+            print(f"Debug: Exception in create_project_with_pdfs: {e}")
             # If PDF upload failed or project creation failed, clean up
+            # Note: This is a simplified cleanup that could be improved
             raise ValueError(f"Project creation failed: {str(e)}")
     
-    def create_project_without_pdf(self, name: str, description: str, user_id: int) -> Dict[str, Any]:
-        """Create a new project without an initial PDF document"""
+    def create_project_without_pdfs(self, name: str, description: str, user_id: int) -> Dict[str, Any]:
+        """Create a new project without any initial PDF documents"""
         # Generate unique project ID
         project_id = uuid.uuid4().hex
         
         try:
-            # Create the project without a document
+            # Create the project without documents
             db_project_id = self.db.create_project(
                 project_id=project_id,
                 name=name,
                 description=description,
                 user_id=user_id,
-                doc_id=None
+                doc_ids=None
             )
             
             if db_project_id is None:
@@ -78,7 +109,7 @@ class ProjectService:
                 "name": name,
                 "description": description,
                 "user_id": user_id,
-                "document": None,
+                "documents": None,
                 "created_at": "just created"
             }
             
@@ -93,19 +124,22 @@ class ProjectService:
         
         # Get document information if associated
         document_info = None
-        if project.doc_id:
-            try:
-                document_info = pdf_processor.get_document_info(project.doc_id)
-            except Exception:
-                # Document might have been deleted
-                document_info = {"error": "Document not found"}
+        if project.doc_ids:
+            document_info = []
+            for doc_id in project.doc_ids:
+                try:
+                    doc_info = pdf_processor.get_document_info(doc_id)
+                    document_info.append(doc_info)
+                except Exception:
+                    # Document might have been deleted
+                    document_info.append({"error": "Document not found", "doc_id": doc_id})
         
         return {
             "project_id": project.project_id,
             "name": project.name,
             "description": project.description,
             "user_id": project.user_id,
-            "document": document_info,
+            "documents": document_info,
             "created_at": project.created_at,
             "updated_at": project.updated_at
         }
@@ -118,19 +152,22 @@ class ProjectService:
         for project in projects:
             # Get document information if associated
             document_info = None
-            if project.doc_id:
-                try:
-                    document_info = pdf_processor.get_document_info(project.doc_id)
-                except Exception:
-                    # Document might have been deleted
-                    document_info = {"error": "Document not found"}
+            if project.doc_ids:
+                document_info = []
+                for doc_id in project.doc_ids:
+                    try:
+                        doc_info = pdf_processor.get_document_info(doc_id)
+                        document_info.append(doc_info)
+                    except Exception:
+                        # Document might have been deleted
+                        document_info.append({"error": "Document not found", "doc_id": doc_id})
             
             result.append({
                 "project_id": project.project_id,
                 "name": project.name,
                 "description": project.description,
                 "user_id": project.user_id,
-                "document": document_info,
+                "documents": document_info,
                 "created_at": project.created_at,
                 "updated_at": project.updated_at
             })
@@ -138,32 +175,51 @@ class ProjectService:
         return result
     
     def add_document_to_project(self, project_id: str, file_content: bytes, filename: str) -> Dict[str, Any]:
-        """Add a PDF document to an existing project"""
+        """Add a PDF document to an existing project (backward compatibility)"""
+        return self.add_documents_to_project(project_id, [file_content], [filename])
+    
+    def add_documents_to_project(self, project_id: str, file_contents: List[bytes], filenames: List[str]) -> Dict[str, Any]:
+        """Add one or more PDF documents to an existing project"""
         # Check if project exists
         project = self.db.get_project_by_id(project_id)
         if not project:
             raise ValueError("Project not found")
         
         try:
-            # Upload and index the PDF
-            pdf_result = pdf_processor.upload_and_index_pdf(file_content, filename)
-            doc_id = pdf_result["doc_id"]
+            # Upload and index all PDFs
+            document_info = []
             
-            # Update the project with the document ID
-            self.db.update_project_document(project_id, doc_id)
-            
-            return {
-                "project_id": project_id,
-                "document": {
-                    "doc_id": doc_id,
+            for i, (file_content, filename) in enumerate(zip(file_contents, filenames)):
+                pdf_result = pdf_processor.upload_and_index_pdf(file_content, filename)
+                
+                document_info.append({
+                    "doc_id": pdf_result["doc_id"],
                     "filename": pdf_result["filename"],
                     "pages": pdf_result["pages"],
                     "chunks_indexed": pdf_result["chunks_indexed"]
-                }
+                })
+            
+            # Update the project with the new document IDs
+            # Get existing doc_ids
+            doc_ids = project.doc_ids if project.doc_ids else []
+            
+            # Add new doc_ids
+            for doc_info in document_info:
+                doc_ids.append(doc_info["doc_id"])
+            
+            self.db.update_project_document(project_id, doc_ids)
+            
+            # Return updated project information
+            updated_project = self.get_project(project_id)
+            
+            result = {
+                "project_id": project_id,
+                "documents": document_info
             }
+            return result
             
         except Exception as e:
-            raise ValueError(f"Failed to add document to project: {str(e)}")
+            raise ValueError(f"Failed to add documents to project: {str(e)}")
     
     def update_project(self, project_id: str, name: str = None, description: str = None) -> Dict[str, Any]:
         """Update project details"""
