@@ -212,7 +212,7 @@ class DatabaseManager:
                     doc_id VARCHAR(255) UNIQUE NOT NULL,
                     filename VARCHAR(255) NOT NULL,
                     pdf_path TEXT NOT NULL,
-                    vector_path TEXT NOT NULL,
+                    vector_path TEXT,
                     pages INT DEFAULT 0,
                     chunks_indexed INT DEFAULT 0,
                     status VARCHAR(50) DEFAULT 'active',
@@ -390,10 +390,11 @@ class DatabaseManager:
                     
                     if not column_exists:
                         print("Adding vector_path column to documents table (MySQL)...")
-                        cur.execute("ALTER TABLE documents ADD COLUMN vector_path TEXT NOT NULL DEFAULT ''")
+                        # MySQL TEXT columns cannot have default values
+                        cur.execute("ALTER TABLE documents ADD COLUMN vector_path TEXT")
                         
                         # Update existing records with vector paths
-                        cur.execute("SELECT doc_id FROM documents WHERE vector_path = '' OR vector_path IS NULL")
+                        cur.execute("SELECT doc_id FROM documents WHERE vector_path IS NULL")
                         docs_to_update = cur.fetchall()
                         
                         for (doc_id,) in docs_to_update:
