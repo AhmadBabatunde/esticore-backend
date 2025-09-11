@@ -14,7 +14,7 @@ class Settings:
     APP_NAME = "Floorplan LangGraph Agent + RAG API"
     VERSION = "1.0.0"
     HOST = "0.0.0.0"
-    PORT = 8000
+    PORT = 8001
     
     # OpenAI Configuration
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
@@ -34,7 +34,17 @@ class Settings:
     ROBOFLOW_MODEL_ID = "full-set-menu/5"
     
     # Database Configuration
-    DATABASE_NAME = "project.db"
+    DATABASE_NAME = "project.db"  # Legacy SQLite database
+    
+    # AWS RDS MySQL Configuration
+    DB_HOST = os.getenv('DB_HOST')
+    DB_PORT = int(os.getenv('DB_PORT', 3306))
+    DB_NAME = os.getenv('DB_NAME')
+    DB_USER = os.getenv('DB_USER')
+    DB_PASSWORD = os.getenv('DB_PASSWORD')
+    
+    # Database type selection
+    USE_RDS = bool(DB_HOST and DB_NAME and DB_USER and DB_PASSWORD)
     
     # Directory Configuration
     DATA_DIR = os.path.abspath("data")
@@ -61,6 +71,11 @@ class Settings:
         """Validate required settings"""
         if not cls.OPENAI_API_KEY:
             raise ValueError("OPENAI_API_KEY not found in environment variables")
+        
+        # Validate database configuration
+        if cls.USE_RDS:
+            if not all([cls.DB_HOST, cls.DB_NAME, cls.DB_USER, cls.DB_PASSWORD]):
+                raise ValueError("AWS RDS configuration incomplete. Please set DB_HOST, DB_NAME, DB_USER, and DB_PASSWORD")
         
         # Create directories if they don't exist
         for directory in [cls.DATA_DIR, cls.VECTORS_DIR, cls.OUTPUT_DIR, cls.DOCS_DIR, cls.IMAGES_DIR]:

@@ -30,70 +30,48 @@ async def login(email: str = Form(...), password: str = Form(...)):
     return auth_service.login_user(email, password)
 
 @router.post("/google-signup")
-async def google_signup(request: Request, id_token: str = Form(None)):
+async def google_signup(id_token: str = Form(...)):
     """
     Google OAuth signup endpoint
-    Accepts both form data and JSON
+    Accepts FormData with id_token field
     """
-    # Handle form data
-    if id_token:
-        return auth_service.google_signup(id_token)
-    
-    # Handle JSON data
-    try:
-        body = await request.body()
-        if body:
-            content_type = request.headers.get("content-type", "")
-            if "application/json" in content_type:
-                data = json.loads(body)
-                id_token = data.get("id_token")
-            elif "application/x-www-form-urlencoded" in content_type:
-                # This should be handled by Form(...) above, but just in case
-                body_str = body.decode("utf-8")
-                if "id_token=" in body_str:
-                    id_token = body_str.split("id_token=")[1].split("&")[0]
-                    # URL decode the token
-                    import urllib.parse
-                    id_token = urllib.parse.unquote(id_token)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not parse request body: {str(e)}")
-    
     if not id_token:
         raise HTTPException(status_code=400, detail="id_token is required")
     
     return auth_service.google_signup(id_token)
 
 @router.post("/google-signin")
-async def google_signin(request: Request, id_token: str = Form(None)):
+async def google_signin(id_token: str = Form(...)):
     """
     Google OAuth signin endpoint
-    Accepts both form data and JSON
+    Accepts FormData with id_token field
     """
-    # Handle form data
-    if id_token:
-        return auth_service.google_signin(id_token)
-    
-    # Handle JSON data
-    try:
-        body = await request.body()
-        if body:
-            content_type = request.headers.get("content-type", "")
-            if "application/json" in content_type:
-                data = json.loads(body)
-                id_token = data.get("id_token")
-            elif "application/x-www-form-urlencoded" in content_type:
-                body_str = body.decode("utf-8")
-                if "id_token=" in body_str:
-                    id_token = body_str.split("id_token=")[1].split("&")[0]
-                    import urllib.parse
-                    id_token = urllib.parse.unquote(id_token)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not parse request body: {str(e)}")
-    
     if not id_token:
         raise HTTPException(status_code=400, detail="id_token is required")
     
     return auth_service.google_signin(id_token)
+
+@router.post("/google-signup-userinfo")
+async def google_signup_userinfo(
+    email: str = Form(...),
+    firstname: str = Form(...),
+    lastname: str = Form(...),
+    google_id: str = Form(...)
+):
+    """
+    Google OAuth signup endpoint using user info instead of ID token
+    """
+    return auth_service.google_signup_userinfo(email, firstname, lastname, google_id)
+
+@router.post("/google-signin-userinfo")
+async def google_signin_userinfo(
+    email: str = Form(...),
+    google_id: str = Form(...)
+):
+    """
+    Google OAuth signin endpoint using user info instead of ID token
+    """
+    return auth_service.google_signin_userinfo(email, google_id)
 
 @router.get("/google-oauth-test", response_class=HTMLResponse)
 async def google_oauth_test():

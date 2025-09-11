@@ -25,6 +25,10 @@ opencv-python
 # Vector database
 faiss-cpu
 
+# Database drivers
+PyMySQL
+mysql-connector-python
+
 # Environment variables
 python-dotenv
 
