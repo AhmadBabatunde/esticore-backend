@@ -23,6 +23,21 @@ class User:
     created_at: Optional[datetime] = None
 
 @dataclass
+class Document:
+    """Document data model"""
+    id: Optional[int] = None
+    doc_id: str = ""  # Unique document identifier (UUID)
+    filename: str = ""
+    pdf_path: str = ""
+    vector_path: str = ""  # Path to FAISS vector store directory
+    pages: int = 0
+    chunks_indexed: int = 0
+    status: str = "active"  # active, file_missing, error
+    user_id: int = 0  # Owner of the document
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+@dataclass
 class Project:
     """Project data model"""
     id: Optional[int] = None
@@ -189,6 +204,42 @@ class DatabaseManager:
                 ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """)
             
+            # Create documents table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS documents(
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    doc_id VARCHAR(255) UNIQUE NOT NULL,
+                    filename VARCHAR(255) NOT NULL,
+                    pdf_path TEXT NOT NULL,
+                    vector_path TEXT NOT NULL,
+                    pages INT DEFAULT 0,
+                    chunks_indexed INT DEFAULT 0,
+                    status VARCHAR(50) DEFAULT 'active',
+                    user_id INT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    INDEX idx_doc_id (doc_id),
+                    INDEX idx_user_id (user_id),
+                    INDEX idx_status (status)
+                ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """)
+            
+            # Create project_documents junction table for many-to-many relationship
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS project_documents(
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    project_id VARCHAR(255) NOT NULL,
+                    doc_id VARCHAR(255) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (project_id) REFERENCES projects (project_id) ON DELETE CASCADE,
+                    FOREIGN KEY (doc_id) REFERENCES documents (doc_id) ON DELETE CASCADE,
+                    UNIQUE KEY unique_project_document (project_id, doc_id),
+                    INDEX idx_project_id (project_id),
+                    INDEX idx_doc_id (doc_id)
+                ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """)
+            
             # Create test user if not exists
             cur.execute("SELECT * FROM userdata WHERE email = %s", ("test@example.com",))
             if not cur.fetchone():
@@ -250,6 +301,46 @@ class DatabaseManager:
             elif 'doc_ids' not in columns:
                 # Add doc_ids column if it doesn't exist
                 cur.execute("ALTER TABLE projects ADD COLUMN doc_ids TEXT")
+            
+            # Create documents table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS documents(
+                    id INTEGER PRIMARY KEY,
+                    doc_id TEXT UNIQUE NOT NULL,
+                    filename TEXT NOT NULL,
+                    pdf_path TEXT NOT NULL,
+                    vector_path TEXT NOT NULL,
+                    pages INTEGER DEFAULT 0,
+                    chunks_indexed INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'active',
+                    user_id INTEGER NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id)
+                )
+            """)
+            
+            # Create indexes for documents table
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_documents_doc_id ON documents (doc_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_documents_user_id ON documents (user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_documents_status ON documents (status)")
+            
+            # Create project_documents junction table for many-to-many relationship
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS project_documents(
+                    id INTEGER PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    doc_id TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (project_id) REFERENCES projects (project_id) ON DELETE CASCADE,
+                    FOREIGN KEY (doc_id) REFERENCES documents (doc_id) ON DELETE CASCADE,
+                    UNIQUE (project_id, doc_id)
+                )
+            """)
+            
+            # Create indexes for project_documents table
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_project_documents_project_id ON project_documents (project_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_project_documents_doc_id ON project_documents (doc_id)")
             
             # Create test user if not exists
             cur.execute("SELECT * FROM userdata WHERE email = ?", ("test@example.com",))
@@ -687,6 +778,305 @@ class DatabaseManager:
                         (description, project_id)
                     )
             conn.commit()
+        finally:
+            conn.close()
+    
+    # Document management methods
+    def create_document(self, doc_id: str, filename: str, pdf_path: str, vector_path: str, pages: int, chunks_indexed: int, user_id: int) -> int:
+        """Create a new document record"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"INSERT INTO documents (doc_id, filename, pdf_path, vector_path, pages, chunks_indexed, user_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                (doc_id, filename, pdf_path, vector_path, pages, chunks_indexed, user_id)
+            )
+            conn.commit()
+            
+            # Get the new document's ID
+            cur.execute(f"SELECT id FROM documents WHERE doc_id = {placeholder}", (doc_id,))
+            document = cur.fetchone()
+            return document[0] if document else None
+            
+        finally:
+            conn.close()
+    
+    def get_document_by_doc_id(self, doc_id: str) -> Optional[Document]:
+        """Get document by doc_id"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(f"""
+                SELECT id, doc_id, filename, pdf_path, vector_path, pages, chunks_indexed, status, user_id, created_at, updated_at 
+                FROM documents 
+                WHERE doc_id = {placeholder}
+            """, (doc_id,))
+            row = cur.fetchone()
+            
+            if row:
+                return Document(
+                    id=row[0],
+                    doc_id=row[1],
+                    filename=row[2],
+                    pdf_path=row[3],
+                    vector_path=row[4],
+                    pages=row[5],
+                    chunks_indexed=row[6],
+                    status=row[7],
+                    user_id=row[8],
+                    created_at=row[9],
+                    updated_at=row[10]
+                )
+            return None
+            
+        finally:
+            conn.close()
+    
+    def get_user_documents(self, user_id: int) -> List[Document]:
+        """Get all documents for a user"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"SELECT id, doc_id, filename, pdf_path, vector_path, pages, chunks_indexed, status, user_id, created_at, updated_at FROM documents WHERE user_id = {placeholder} ORDER BY created_at DESC",
+                (user_id,)
+            )
+            rows = cur.fetchall()
+            
+            return [
+                Document(
+                    id=row[0],
+                    doc_id=row[1],
+                    filename=row[2],
+                    pdf_path=row[3],
+                    vector_path=row[4],
+                    pages=row[5],
+                    chunks_indexed=row[6],
+                    status=row[7],
+                    user_id=row[8],
+                    created_at=row[9],
+                    updated_at=row[10]
+                )
+                for row in rows
+            ]
+            
+        finally:
+            conn.close()
+    
+    def get_all_documents(self) -> List[Document]:
+        """Get all documents in the system"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        
+        try:
+            cur.execute("""
+                SELECT id, doc_id, filename, pdf_path, vector_path, pages, chunks_indexed, status, user_id, created_at, updated_at 
+                FROM documents 
+                ORDER BY created_at DESC
+            """)
+            rows = cur.fetchall()
+            
+            return [
+                Document(
+                    id=row[0],
+                    doc_id=row[1],
+                    filename=row[2],
+                    pdf_path=row[3],
+                    vector_path=row[4],
+                    pages=row[5],
+                    chunks_indexed=row[6],
+                    status=row[7],
+                    user_id=row[8],
+                    created_at=row[9],
+                    updated_at=row[10]
+                )
+                for row in rows
+            ]
+            
+        finally:
+            conn.close()
+    
+    def update_document_status(self, doc_id: str, status: str) -> bool:
+        """Update document status"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            if self.use_rds:
+                cur.execute(
+                    f"UPDATE documents SET status = {placeholder}, updated_at = CURRENT_TIMESTAMP WHERE doc_id = {placeholder}",
+                    (status, doc_id)
+                )
+            else:
+                cur.execute(
+                    "UPDATE documents SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE doc_id = ?",
+                    (status, doc_id)
+                )
+            conn.commit()
+            return cur.rowcount > 0
+            
+        finally:
+            conn.close()
+    
+    def update_document_pages(self, doc_id: str, pages: int) -> bool:
+        """Update document page count"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            if self.use_rds:
+                cur.execute(
+                    f"UPDATE documents SET pages = {placeholder}, updated_at = CURRENT_TIMESTAMP WHERE doc_id = {placeholder}",
+                    (pages, doc_id)
+                )
+            else:
+                cur.execute(
+                    "UPDATE documents SET pages = ?, updated_at = CURRENT_TIMESTAMP WHERE doc_id = ?",
+                    (pages, doc_id)
+                )
+            conn.commit()
+            return cur.rowcount > 0
+            
+        finally:
+            conn.close()
+    
+    def delete_document(self, doc_id: str) -> bool:
+        """Delete a document record"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(f"DELETE FROM documents WHERE doc_id = {placeholder}", (doc_id,))
+            conn.commit()
+            return cur.rowcount > 0
+            
+        finally:
+            conn.close()
+    
+    # Project-Document relationship methods
+    def add_document_to_project(self, project_id: str, doc_id: str) -> bool:
+        """Add a document to a project"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"INSERT INTO project_documents (project_id, doc_id) VALUES ({placeholder}, {placeholder})",
+                (project_id, doc_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+            
+        except Exception as e:
+            # Handle duplicate key error gracefully
+            if "Duplicate" in str(e) or "UNIQUE constraint" in str(e):
+                return False  # Already exists
+            raise e
+        finally:
+            conn.close()
+    
+    def remove_document_from_project(self, project_id: str, doc_id: str) -> bool:
+        """Remove a document from a project"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"DELETE FROM project_documents WHERE project_id = {placeholder} AND doc_id = {placeholder}",
+                (project_id, doc_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+            
+        finally:
+            conn.close()
+    
+    def get_project_documents(self, project_id: str) -> List[Document]:
+        """Get all documents for a project"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(f"""
+                SELECT d.id, d.doc_id, d.filename, d.pdf_path, d.vector_path, d.pages, d.chunks_indexed, d.status, d.user_id, d.created_at, d.updated_at 
+                FROM documents d
+                INNER JOIN project_documents pd ON d.doc_id = pd.doc_id
+                WHERE pd.project_id = {placeholder}
+                ORDER BY pd.created_at ASC
+            """, (project_id,))
+            rows = cur.fetchall()
+            
+            return [
+                Document(
+                    id=row[0],
+                    doc_id=row[1],
+                    filename=row[2],
+                    pdf_path=row[3],
+                    vector_path=row[4],
+                    pages=row[5],
+                    chunks_indexed=row[6],
+                    status=row[7],
+                    user_id=row[8],
+                    created_at=row[9],
+                    updated_at=row[10]
+                )
+                for row in rows
+            ]
+            
+        finally:
+            conn.close()
+    
+    def get_document_projects(self, doc_id: str) -> List[Project]:
+        """Get all projects that contain a specific document"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(f"""
+                SELECT p.id, p.project_id, p.name, p.description, p.user_id, p.doc_ids, p.created_at, p.updated_at 
+                FROM projects p
+                INNER JOIN project_documents pd ON p.project_id = pd.project_id
+                WHERE pd.doc_id = {placeholder}
+                ORDER BY p.created_at DESC
+            """, (doc_id,))
+            rows = cur.fetchall()
+            
+            result = []
+            for row in rows:
+                # Parse doc_ids from JSON string if present
+                doc_ids = None
+                if row[5]:
+                    try:
+                        doc_ids = json.loads(row[5])
+                    except json.JSONDecodeError:
+                        doc_ids = [row[5]]  # Fallback to old single doc_id format
+                
+                result.append(Project(
+                    id=row[0],
+                    project_id=row[1],
+                    name=row[2],
+                    description=row[3],
+                    user_id=row[4],
+                    doc_ids=doc_ids,
+                    created_at=row[6],
+                    updated_at=row[7]
+                ))
+            
+            return result
+            
         finally:
             conn.close()
 

@@ -39,7 +39,7 @@ class ProjectService:
                 print(f"Debug: processing file {i+1}/{len(file_contents)}: {filename}")
                 print(f"Debug: file content size: {len(file_content)} bytes")
                 
-                pdf_result = pdf_processor.upload_and_index_pdf(file_content, filename)
+                pdf_result = pdf_processor.upload_and_index_pdf(file_content, filename, user_id)
                 print(f"Debug: PDF processed successfully, doc_id: {pdf_result['doc_id']}")
                 
                 doc_ids.append(pdf_result["doc_id"])
@@ -58,13 +58,17 @@ class ProjectService:
                 name=name,
                 description=description,
                 user_id=user_id,
-                doc_ids=doc_ids
+                doc_ids=doc_ids  # Keep for backward compatibility
             )
             
             print(f"Debug: Project created in database with ID: {db_project_id}")
             
             if db_project_id is None:
                 raise ValueError("Failed to create project in database")
+            
+            # Add documents to project using junction table
+            for doc_id in doc_ids:
+                self.db.add_document_to_project(project_id, doc_id)
             
             # Return comprehensive project information
             result = {
@@ -122,24 +126,27 @@ class ProjectService:
         if not project:
             return None
         
-        # Get document information if associated
-        document_info = None
-        if project.doc_ids:
-            document_info = []
-            for doc_id in project.doc_ids:
-                try:
-                    doc_info = pdf_processor.get_document_info(doc_id)
-                    document_info.append(doc_info)
-                except Exception:
-                    # Document might have been deleted
-                    document_info.append({"error": "Document not found", "doc_id": doc_id})
+        # Get document information from junction table
+        documents = self.db.get_project_documents(project_id)
+        document_info = []
+        
+        for doc in documents:
+            doc_info = {
+                "doc_id": doc.doc_id,
+                "filename": doc.filename,
+                "pdf_path": doc.pdf_path,
+                "vector_path": doc.vector_path,
+                "pages": doc.pages,
+                "status": doc.status
+            }
+            document_info.append(doc_info)
         
         return {
             "project_id": project.project_id,
             "name": project.name,
             "description": project.description,
             "user_id": project.user_id,
-            "documents": document_info,
+            "documents": document_info if document_info else None,
             "created_at": project.created_at,
             "updated_at": project.updated_at
         }
@@ -150,24 +157,27 @@ class ProjectService:
         
         result = []
         for project in projects:
-            # Get document information if associated
-            document_info = None
-            if project.doc_ids:
-                document_info = []
-                for doc_id in project.doc_ids:
-                    try:
-                        doc_info = pdf_processor.get_document_info(doc_id)
-                        document_info.append(doc_info)
-                    except Exception:
-                        # Document might have been deleted
-                        document_info.append({"error": "Document not found", "doc_id": doc_id})
+            # Get document information from junction table
+            documents = self.db.get_project_documents(project.project_id)
+            document_info = []
+            
+            for doc in documents:
+                doc_info = {
+                    "doc_id": doc.doc_id,
+                    "filename": doc.filename,
+                    "pdf_path": doc.pdf_path,
+                    "vector_path": doc.vector_path,
+                    "pages": doc.pages,
+                    "status": doc.status
+                }
+                document_info.append(doc_info)
             
             result.append({
                 "project_id": project.project_id,
                 "name": project.name,
                 "description": project.description,
                 "user_id": project.user_id,
-                "documents": document_info,
+                "documents": document_info if document_info else None,
                 "created_at": project.created_at,
                 "updated_at": project.updated_at
             })
@@ -190,7 +200,7 @@ class ProjectService:
             document_info = []
             
             for i, (file_content, filename) in enumerate(zip(file_contents, filenames)):
-                pdf_result = pdf_processor.upload_and_index_pdf(file_content, filename)
+                pdf_result = pdf_processor.upload_and_index_pdf(file_content, filename, project.user_id)
                 
                 document_info.append({
                     "doc_id": pdf_result["doc_id"],
@@ -200,12 +210,15 @@ class ProjectService:
                 })
             
             # Update the project with the new document IDs
-            # Get existing doc_ids
-            doc_ids = project.doc_ids if project.doc_ids else []
-            
-            # Add new doc_ids
+            # Add documents to junction table
             for doc_info in document_info:
-                doc_ids.append(doc_info["doc_id"])
+                self.db.add_document_to_project(project_id, doc_info["doc_id"])
+            
+            # Also update the projects table for backward compatibility
+            doc_ids = project.doc_ids if project.doc_ids else []
+            for doc_info in document_info:
+                if doc_info["doc_id"] not in doc_ids:
+                    doc_ids.append(doc_info["doc_id"])
             
             self.db.update_project_document(project_id, doc_ids)
             

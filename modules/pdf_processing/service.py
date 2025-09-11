@@ -11,7 +11,7 @@ from langchain_community.vectorstores import FAISS
 from langchain.docstore.document import Document
 
 from modules.config.settings import settings
-from modules.config.utils import load_registry, save_registry
+from modules.database.models import db_manager
 
 class PDFProcessor:
     """PDF processing and indexing service"""
@@ -58,7 +58,7 @@ class PDFProcessor:
         
         return FAISS.load_local(path, self.embeddings, allow_dangerous_deserialization=True)
     
-    def upload_and_index_pdf(self, file_content: bytes, filename: str) -> dict:
+    def upload_and_index_pdf(self, file_content: bytes, filename: str, user_id: int) -> dict:
         """Upload and index a PDF file"""
         if not filename.lower().endswith(".pdf"):
             raise ValueError("Please upload a PDF file")
@@ -79,14 +79,33 @@ class PDFProcessor:
                 os.remove(pdf_path)
             raise ValueError(f"Indexing failed: {e}")
         
-        # Update registry
-        reg = load_registry()
-        reg[doc_id] = {"pdf_path": pdf_path, "filename": filename}
-        save_registry(reg)
-        
         # Get page count
         reader = PdfReader(pdf_path)
         num_pages = len(reader.pages)
+        
+        # Get vector path
+        vector_path = os.path.join(settings.VECTORS_DIR, doc_id)
+        
+        # Save document info to database
+        try:
+            db_manager.create_document(
+                doc_id=doc_id,
+                filename=filename,
+                pdf_path=pdf_path,
+                vector_path=vector_path,
+                pages=num_pages,
+                chunks_indexed=n_chunks,
+                user_id=user_id
+            )
+        except Exception as e:
+            # Clean up files if database save fails
+            if os.path.exists(pdf_path):
+                os.remove(pdf_path)
+            # Also clean up vector store
+            if os.path.exists(vector_path):
+                import shutil
+                shutil.rmtree(vector_path)
+            raise ValueError(f"Database save failed: {e}")
         
         return {
             "doc_id": doc_id,
@@ -95,14 +114,14 @@ class PDFProcessor:
             "chunks_indexed": n_chunks
         }
     
-    def upload_and_index_multiple_pdfs(self, file_contents: List[bytes], filenames: List[str]) -> List[dict]:
+    def upload_and_index_multiple_pdfs(self, file_contents: List[bytes], filenames: List[str], user_id: int) -> List[dict]:
         """Upload and index multiple PDF files"""
         results = []
         errors = []
         
         for i, (file_content, filename) in enumerate(zip(file_contents, filenames)):
             try:
-                result = self.upload_and_index_pdf(file_content, filename)
+                result = self.upload_and_index_pdf(file_content, filename, user_id)
                 results.append(result)
             except Exception as e:
                 error_info = {
@@ -122,47 +141,101 @@ class PDFProcessor:
     
     def get_document_info(self, doc_id: str) -> dict:
         """Get document information"""
-        reg = load_registry()
-        if doc_id not in reg:
+        document = db_manager.get_document_by_doc_id(doc_id)
+        if not document:
             raise FileNotFoundError("Document not found")
         
-        pdf_path = reg[doc_id]["pdf_path"]
-        if not os.path.exists(pdf_path):
-            raise FileNotFoundError("PDF file not found")
+        # Check if PDF file and vector store still exist
+        pdf_exists = os.path.exists(document.pdf_path)
+        vector_exists = os.path.exists(document.vector_path)
         
-        reader = PdfReader(pdf_path)
+        if not pdf_exists or not vector_exists:
+            missing_files = []
+            if not pdf_exists:
+                missing_files.append("PDF")
+            if not vector_exists:
+                missing_files.append("vectors")
+            
+            status = f"missing_{'+'.join(missing_files).lower()}"
+            # Update status in database
+            db_manager.update_document_status(doc_id, status)
+            return {
+                "doc_id": doc_id,
+                "filename": document.filename,
+                "pdf_path": document.pdf_path,
+                "vector_path": document.vector_path,
+                "pages": document.pages,
+                "status": status
+            }
+        
         return {
             "doc_id": doc_id,
-            "filename": reg[doc_id].get("filename", f"{doc_id}.pdf"),
-            "pdf_path": pdf_path,
-            "pages": len(reader.pages)
+            "filename": document.filename,
+            "pdf_path": document.pdf_path,
+            "vector_path": document.vector_path,
+            "pages": document.pages,
+            "status": document.status
         }
     
-    def list_documents(self) -> dict:
-        """List all documents in the registry"""
-        reg = load_registry()
+    def list_documents(self, user_id: int = None) -> dict:
+        """List all documents in the database"""
+        if user_id:
+            documents = db_manager.get_user_documents(user_id)
+        else:
+            documents = db_manager.get_all_documents()
         
-        # Add page count to each document
-        enhanced_reg = {}
-        for doc_id, doc_info in reg.items():
-            enhanced_info = doc_info.copy()
-            try:
-                if os.path.exists(doc_info["pdf_path"]):
-                    reader = PdfReader(doc_info["pdf_path"])
-                    enhanced_info["pages"] = len(reader.pages)
-                else:
-                    enhanced_info["pages"] = 0
-                    enhanced_info["status"] = "file_missing"
-            except Exception:
-                enhanced_info["pages"] = 0
-                enhanced_info["status"] = "error"
+        # Convert to dictionary format and add file existence check
+        result = {}
+        for doc in documents:
+            doc_info = {
+                "filename": doc.filename,
+                "pdf_path": doc.pdf_path,
+                "vector_path": doc.vector_path,
+                "pages": doc.pages,
+                "chunks_indexed": doc.chunks_indexed,
+                "status": doc.status,
+                "user_id": doc.user_id,
+                "created_at": doc.created_at.isoformat() if doc.created_at else None,
+                "updated_at": doc.updated_at.isoformat() if doc.updated_at else None
+            }
             
-            enhanced_reg[doc_id] = enhanced_info
+            # Check if PDF file and vector store still exist
+            pdf_exists = os.path.exists(doc.pdf_path)
+            vector_exists = os.path.exists(doc.vector_path)
+            
+            if not pdf_exists or not vector_exists:
+                missing_files = []
+                if not pdf_exists:
+                    missing_files.append("PDF")
+                if not vector_exists:
+                    missing_files.append("vectors")
+                
+                new_status = f"missing_{'+'.join(missing_files).lower()}"
+                if doc.status != new_status:
+                    db_manager.update_document_status(doc.doc_id, new_status)
+                doc_info["status"] = new_status
+            
+            result[doc.doc_id] = doc_info
         
-        return enhanced_reg
+        return result
     
     def query_document(self, doc_id: str, question: str, k: int = 5) -> dict:
         """Query document using RAG"""
+        # Check if document exists in database
+        document = db_manager.get_document_by_doc_id(doc_id)
+        if not document:
+            raise FileNotFoundError("Document not found")
+        
+        # Check if PDF file exists
+        if not os.path.exists(document.pdf_path):
+            db_manager.update_document_status(doc_id, "missing_pdf")
+            raise FileNotFoundError("PDF file not found")
+        
+        # Check if vector store exists
+        if not os.path.exists(document.vector_path):
+            db_manager.update_document_status(doc_id, "missing_vectors")
+            raise FileNotFoundError("Vector store not found")
+        
         try:
             vs = self.load_vectorstore(doc_id)
             docs = vs.similarity_search(question, k=int(k))
@@ -179,6 +252,44 @@ class PDFProcessor:
             }
         except Exception as e:
             raise ValueError(f"Query failed: {str(e)}")
+    
+    def delete_document_files(self, doc_id: str) -> bool:
+        """Delete both PDF and vector files for a document"""
+        success = True
+        
+        # Get document info from database
+        document = db_manager.get_document_by_doc_id(doc_id)
+        if not document:
+            return False
+        
+        # Delete PDF file
+        try:
+            if os.path.exists(document.pdf_path):
+                os.remove(document.pdf_path)
+                print(f"Deleted PDF file: {document.pdf_path}")
+        except Exception as e:
+            print(f"Error deleting PDF file {document.pdf_path}: {e}")
+            success = False
+        
+        # Delete vector store directory
+        try:
+            if os.path.exists(document.vector_path):
+                import shutil
+                shutil.rmtree(document.vector_path)
+                print(f"Deleted vector store: {document.vector_path}")
+        except Exception as e:
+            print(f"Error deleting vector store {document.vector_path}: {e}")
+            success = False
+        
+        # Delete from database
+        try:
+            db_manager.delete_document(doc_id)
+            print(f"Deleted document from database: {doc_id}")
+        except Exception as e:
+            print(f"Error deleting document from database {doc_id}: {e}")
+            success = False
+        
+        return success
 
 # Global PDF processor instance
 pdf_processor = PDFProcessor()

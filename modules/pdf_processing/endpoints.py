@@ -8,7 +8,7 @@ from modules.pdf_processing.service import pdf_processor
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 @router.post("/upload")
-async def upload_pdf(files: List[UploadFile] = File(...)):
+async def upload_pdf(files: List[UploadFile] = File(...), user_id: int = Form(...)):
     """
     Upload and index PDF document(s) - supports both single and multiple files
     """
@@ -36,7 +36,7 @@ async def upload_pdf(files: List[UploadFile] = File(...)):
         if len(valid_files) == 1:
             file = valid_files[0]
             file_content = await file.read()
-            result = pdf_processor.upload_and_index_pdf(file_content, file.filename)
+            result = pdf_processor.upload_and_index_pdf(file_content, file.filename, user_id)
             print(f"Debug: single file upload result: {result}")
             return result
         
@@ -51,7 +51,7 @@ async def upload_pdf(files: List[UploadFile] = File(...)):
                 filenames.append(file.filename)
                 print(f"Debug: processed file {file.filename}, size: {len(content)} bytes")
             
-            result = pdf_processor.upload_and_index_multiple_pdfs(file_contents, filenames)
+            result = pdf_processor.upload_and_index_multiple_pdfs(file_contents, filenames, user_id)
             print(f"Debug: multiple files upload result: {result}")
             return result
         
@@ -62,7 +62,7 @@ async def upload_pdf(files: List[UploadFile] = File(...)):
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @router.post("/upload-multiple")
-async def upload_multiple_pdfs(files: List[UploadFile] = File(...)):
+async def upload_multiple_pdfs(files: List[UploadFile] = File(...), user_id: int = Form(...)):
     """
     Upload and index multiple PDF documents
     """
@@ -97,7 +97,7 @@ async def upload_multiple_pdfs(files: List[UploadFile] = File(...)):
             print(f"Debug: processed file {file.filename}, size: {len(content)} bytes")
         
         # Process files
-        result = pdf_processor.upload_and_index_multiple_pdfs(file_contents, filenames)
+        result = pdf_processor.upload_and_index_multiple_pdfs(file_contents, filenames, user_id)
         print(f"Debug: upload result: {result}")
         
         return result
@@ -109,11 +109,11 @@ async def upload_multiple_pdfs(files: List[UploadFile] = File(...)):
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @router.get("/")
-def list_documents():
+def list_documents(user_id: int = None):
     """
-    List all uploaded documents
+    List all uploaded documents, optionally filtered by user
     """
-    return pdf_processor.list_documents()
+    return pdf_processor.list_documents(user_id)
 
 @router.get("/{doc_id}")
 def get_document_info(doc_id: str):
@@ -152,5 +152,19 @@ async def query_document(doc_id: str, question: str = Form(...), k: int = Form(5
         raise HTTPException(status_code=400, detail=str(e))
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/{doc_id}")
+def delete_document(doc_id: str):
+    """
+    Delete a document and all associated files (PDF and vectors)
+    """
+    try:
+        success = pdf_processor.delete_document_files(doc_id)
+        if success:
+            return {"message": "Document deleted successfully", "doc_id": doc_id}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to delete document completely")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
