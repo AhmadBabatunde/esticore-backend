@@ -14,7 +14,7 @@ class Settings:
     APP_NAME = "Floorplan LangGraph Agent + RAG API"
     VERSION = "1.0.0"
     HOST = "0.0.0.0"
-    PORT = 8001
+    PORT = 8000
     
     # OpenAI Configuration
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
