@@ -1,6 +1,7 @@
 """
 Database models and operations for the Floor Plan Agent API
 """
+import os
 import sqlite3
 import mysql.connector
 from mysql.connector import Error as MySQLError
@@ -353,6 +354,91 @@ class DatabaseManager:
         
         conn.commit()
         conn.close()
+        
+        # Run migration for existing databases
+        self._migrate_documents_schema()
+    
+    def _migrate_documents_schema(self):
+        """Migrate documents table to include vector_path column if it doesn't exist"""
+        conn = None
+        try:
+            conn = self.get_connection()
+            cur = conn.cursor()
+            
+            if self.use_rds:
+                # Check if documents table exists first
+                cur.execute("""
+                    SELECT COUNT(*) 
+                    FROM INFORMATION_SCHEMA.TABLES 
+                    WHERE TABLE_SCHEMA = %s 
+                    AND TABLE_NAME = 'documents'
+                """, (settings.DB_NAME,))
+                
+                table_exists = cur.fetchone()[0] > 0
+                
+                if table_exists:
+                    # Check if vector_path column exists in MySQL
+                    cur.execute("""
+                        SELECT COUNT(*) 
+                        FROM INFORMATION_SCHEMA.COLUMNS 
+                        WHERE TABLE_SCHEMA = %s 
+                        AND TABLE_NAME = 'documents' 
+                        AND COLUMN_NAME = 'vector_path'
+                    """, (settings.DB_NAME,))
+                    
+                    column_exists = cur.fetchone()[0] > 0
+                    
+                    if not column_exists:
+                        print("Adding vector_path column to documents table (MySQL)...")
+                        cur.execute("ALTER TABLE documents ADD COLUMN vector_path TEXT NOT NULL DEFAULT ''")
+                        
+                        # Update existing records with vector paths
+                        cur.execute("SELECT doc_id FROM documents WHERE vector_path = '' OR vector_path IS NULL")
+                        docs_to_update = cur.fetchall()
+                        
+                        for (doc_id,) in docs_to_update:
+                            vector_path = os.path.join(settings.VECTORS_DIR, doc_id)
+                            cur.execute("UPDATE documents SET vector_path = %s WHERE doc_id = %s", (vector_path, doc_id))
+                        
+                        conn.commit()
+                        print(f"Updated {len(docs_to_update)} documents with vector paths")
+                    else:
+                        print("vector_path column already exists in documents table")
+            else:
+                # Check if documents table exists first for SQLite
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='documents'")
+                table_exists = cur.fetchone() is not None
+                
+                if table_exists:
+                    # Check if vector_path column exists in SQLite
+                    cur.execute("PRAGMA table_info(documents)")
+                    columns = [row[1] for row in cur.fetchall()]
+                    
+                    if 'vector_path' not in columns:
+                        print("Adding vector_path column to documents table (SQLite)...")
+                        cur.execute("ALTER TABLE documents ADD COLUMN vector_path TEXT NOT NULL DEFAULT ''")
+                        
+                        # Update existing records with vector paths
+                        cur.execute("SELECT doc_id FROM documents WHERE vector_path = '' OR vector_path IS NULL")
+                        docs_to_update = cur.fetchall()
+                        
+                        for (doc_id,) in docs_to_update:
+                            vector_path = os.path.join(settings.VECTORS_DIR, doc_id)
+                            cur.execute("UPDATE documents SET vector_path = ? WHERE doc_id = ?", (vector_path, doc_id))
+                        
+                        conn.commit()
+                        print(f"Updated {len(docs_to_update)} documents with vector paths")
+                    else:
+                        print("vector_path column already exists in documents table")
+                        
+        except Exception as e:
+            print(f"Migration error: {e}")
+            if conn:
+                conn.rollback()
+            # Don't raise the exception to prevent breaking initialization
+        finally:
+            if conn:
+                conn.close()
     
     def _get_placeholder(self):
         """Get the appropriate parameter placeholder for the database type"""
