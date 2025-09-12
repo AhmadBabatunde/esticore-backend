@@ -2,4 +2,6 @@
 project.db
 data
 postman
-esticore-pair.pem
+C:\Users\user\Documents\esticore\esticore-pair.pem
+__pycache__/
+*.pyc

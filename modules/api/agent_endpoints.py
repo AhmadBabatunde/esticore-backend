@@ -10,7 +10,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from langchain_core.messages import HumanMessage
 
 from modules.config.settings import settings
-from modules.config.utils import load_registry, delete_file_after_delay
+from modules.config.utils import delete_file_after_delay
+from modules.pdf_processing.service import pdf_processor
 from modules.database import db_manager
 from modules.agent import agent_workflow
 from modules.projects.service import project_service
@@ -54,12 +55,13 @@ async def unified_agent(
     Single unified endpoint that intelligently handles both chat and annotation workflows.
     The agent automatically determines intent and extracts page information from the instruction.
     """
-    # Verify document exists
-    reg = load_registry()
-    if doc_id not in reg:
+    # Verify document exists in database
+    try:
+        doc_info = pdf_processor.get_document_info(doc_id)
+    except FileNotFoundError:
         raise HTTPException(404, detail="Document not found")
     
-    pdf_path = reg[doc_id]["pdf_path"]
+    pdf_path = doc_info["pdf_path"]
     
     # Extract page number from instruction or default to 1
     page_number = 1
@@ -295,11 +297,20 @@ async def unified_agent_for_project(
     project_id: str,
     user_instruction: str = Form(...),
     user_id: int = Form(...),
-    session_id: str = Form(None)
+    session_id: str = Form(None),
+    doc_id: str = Form(None)
 ):
     """
     Project-aware unified endpoint that works with project context.
     Automatically extracts the document from the project and provides project context.
+    
+    Args:
+        project_id: The project identifier
+        user_instruction: The user's instruction/query
+        user_id: The user's ID for authentication
+        session_id: Optional session ID for conversation continuity
+        doc_id: Optional specific document ID to use from the project.
+                If not provided, uses the first document in the project.
     """
     # Validate project access
     if not project_service.validate_project_access(project_id, user_id):
@@ -307,17 +318,34 @@ async def unified_agent_for_project(
     
     # Get project information
     project = project_service.get_project(project_id)
-    if not project or not project.get("document"):
+    if not project or not project.get("documents") or len(project["documents"]) == 0:
         raise HTTPException(400, detail="Project has no associated document")
     
-    doc_id = project["document"]["doc_id"]
+    # Select the document to use
+    selected_document = None
+    if doc_id:
+        # Find the specific document in the project
+        for doc in project["documents"]:
+            if doc["doc_id"] == doc_id:
+                selected_document = doc
+                break
+        
+        if not selected_document:
+            available_docs = [doc["doc_id"] for doc in project["documents"]]
+            raise HTTPException(400, detail=f"Document {doc_id} not found in project. Available documents: {available_docs}")
+    else:
+        # Use the first document if no specific doc_id provided
+        selected_document = project["documents"][0]
     
-    # Verify document exists in registry
-    reg = load_registry()
-    if doc_id not in reg:
+    final_doc_id = selected_document["doc_id"]
+    
+    # Verify document exists in database
+    try:
+        doc_info = pdf_processor.get_document_info(final_doc_id)
+    except FileNotFoundError:
         raise HTTPException(404, detail="Document not found")
     
-    pdf_path = reg[doc_id]["pdf_path"]
+    pdf_path = doc_info["pdf_path"]
     
     # Extract page number from instruction or default to 1
     page_number = 1
@@ -333,7 +361,7 @@ async def unified_agent_for_project(
     db_manager.add_chat_message(user_id, session_id, "user", user_instruction)
     
     # Generate unique output path for potential annotations
-    output_filename = f"{project_id}_{doc_id}_page_{page_number}_{uuid.uuid4().hex[:8]}_project.pdf"
+    output_filename = f"{project_id}_{final_doc_id}_page_{page_number}_{uuid.uuid4().hex[:8]}_project.pdf"
     output_pdf_path = os.path.join(settings.OUTPUT_DIR, output_filename)
     
     # Ensure output directory exists
@@ -354,8 +382,9 @@ Project Context:
 - Project ID: {project_id}
 - Project Name: {project["name"]}
 - Project Description: {project["description"]}
-- Document ID: {doc_id}
-- Document: {project["document"]["filename"]} ({project["document"]["pages"]} pages)
+- Document ID: {final_doc_id}
+- Document: {selected_document["filename"]} ({selected_document["pages"]} pages)
+- Available Documents: {[doc['filename'] + ' (' + doc['doc_id'] + ')' for doc in project['documents']]}
 
 User Request: {user_instruction}
 Extracted Page: {page_number}{recent_context}
@@ -390,7 +419,7 @@ Please proceed based on the user's intent.
     }
     
     try:
-        print(f"DEBUG: Starting project agent for project {project_id} with instruction: {user_instruction}")
+        print(f"DEBUG: Starting project agent for project {project_id}, document {final_doc_id} with instruction: {user_instruction}")
         final_state = agent_workflow.process_request(initial_state)
         final_msg = final_state["messages"][-1].content
         
@@ -487,7 +516,7 @@ Please proceed based on the user's intent.
                 "response": answer_text,
                 "session_id": session_id,
                 "project_id": project_id,
-                "doc_id": doc_id,
+                "doc_id": final_doc_id,
                 "page": page_number,
                 "type": "information",
                 "suggestions": suggestions,  # Always include suggestions array (empty if none)
