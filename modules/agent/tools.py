@@ -513,7 +513,7 @@ User question: {question}
 
 Provide a helpful and accurate answer:"""
         
-        llm = ChatOpenAI(model="gpt-4o", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+        llm = ChatOpenAI(model="gpt-5", temperature=0.0, api_key=settings.OPENAI_API_KEY)
         rag_response = llm.invoke(answer_prompt)
         
         # Generate topic suggestions from all retrieved documents
