@@ -47,7 +47,8 @@ class Settings:
     USE_RDS = bool(DB_HOST and DB_NAME and DB_USER and DB_PASSWORD)
     
     # Directory Configuration
-    DATA_DIR = os.path.abspath("data")
+    # Use environment variable for DATA_DIR if available, otherwise use relative path
+    DATA_DIR = os.getenv('DATA_DIR', os.path.abspath("data"))
     VECTORS_DIR = os.path.join(DATA_DIR, "vectors")
     OUTPUT_DIR = os.path.join(DATA_DIR, "outputs")
     DOCS_DIR = os.path.join(DATA_DIR, "docs")
@@ -77,9 +78,27 @@ class Settings:
             if not all([cls.DB_HOST, cls.DB_NAME, cls.DB_USER, cls.DB_PASSWORD]):
                 raise ValueError("AWS RDS configuration incomplete. Please set DB_HOST, DB_NAME, DB_USER, and DB_PASSWORD")
         
-        # Create directories if they don't exist
-        for directory in [cls.DATA_DIR, cls.VECTORS_DIR, cls.OUTPUT_DIR, cls.DOCS_DIR, cls.IMAGES_DIR]:
+        # Log important environment information for debugging
+        print("DEBUG: Environment information:")
+        print(f"  Current working directory: {os.getcwd()}")
+        print(f"  DATA_DIR environment variable: {os.getenv('DATA_DIR', 'Not set')}")
+        print(f"  Script location: {os.path.abspath(__file__)}")
+        
+        # Create directories if they don't exist and log their paths
+        directories = {
+            'DATA_DIR': cls.DATA_DIR,
+            'VECTORS_DIR': cls.VECTORS_DIR,
+            'OUTPUT_DIR': cls.OUTPUT_DIR,
+            'DOCS_DIR': cls.DOCS_DIR,
+            'IMAGES_DIR': cls.IMAGES_DIR
+        }
+        
+        print("DEBUG: Directory configuration:")
+        for name, directory in directories.items():
             os.makedirs(directory, exist_ok=True)
+            print(f"  {name}: {directory}")
+            print(f"    exists: {os.path.exists(directory)}")
+            print(f"    writable: {os.access(directory, os.W_OK)}")
 
 # Global settings instance
 settings = Settings()

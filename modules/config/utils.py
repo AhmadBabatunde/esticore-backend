@@ -47,7 +47,23 @@ def validate_file_path(file_path: str, allowed_base_dir: str = None) -> bool:
         allowed_base_dir = settings.DATA_DIR
     
     abs_path = os.path.abspath(file_path)
-    return abs_path.startswith(allowed_base_dir) and os.path.exists(abs_path)
+    abs_base_dir = os.path.abspath(allowed_base_dir)
+    
+    # For debugging in production, only log if file doesn't exist or validation fails
+    file_exists = os.path.exists(abs_path)
+    path_within_base = abs_path.startswith(abs_base_dir)
+    is_valid = path_within_base and file_exists
+    
+    if not is_valid:
+        print(f"DEBUG: File validation failed:")
+        print(f"  File path: {file_path}")
+        print(f"  Absolute file path: {abs_path}")
+        print(f"  Allowed base dir: {allowed_base_dir}")
+        print(f"  Absolute base dir: {abs_base_dir}")
+        print(f"  File exists: {file_exists}")
+        print(f"  Path starts with base: {path_within_base}")
+    
+    return is_valid
 
 def generate_unique_filename(base_name: str, extension: str, directory: str) -> str:
     """Generate a unique filename in the specified directory"""
