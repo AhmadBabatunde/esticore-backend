@@ -11,6 +11,7 @@ google-auth-httplib2
 
 # LangChain and AI dependencies  
 langchain
+langmem
 langchain-openai
 langchain-community
 langgraph
