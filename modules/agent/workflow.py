@@ -141,7 +141,7 @@ class AgentWorkflow:
         self.memory_manager = MemoryManager()
         
         # Initialize agent with React pattern and memory tools
-        self.llm = ChatOpenAI(model="gpt-5", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+        self.llm = ChatOpenAI(model="gpt-4o", temperature=0.0, api_key=settings.OPENAI_API_KEY)
         self.agent_executor = create_react_agent(
             self.llm,
             tools=ALL_TOOLS + self.memory_manager.get_memory_tools(),
@@ -215,12 +215,22 @@ class AgentWorkflow:
             }
             
             # Invoke the agent executor with the updated state and config
-            response = self.agent_executor.invoke(
-                state_with_context,
-                config=agent_config
-            )
-            
-            return {"messages": [AIMessage(content=response["messages"][-1].content)]}
+            try:
+                response = self.agent_executor.invoke(
+                    state_with_context,
+                    config=agent_config
+                )
+                
+                # Handle response format properly
+                if isinstance(response, dict) and "messages" in response:
+                    return {"messages": [AIMessage(content=response["messages"][-1].content)]}
+                else:
+                    # Fallback for different response formats
+                    return {"messages": [AIMessage(content=str(response))]}
+                    
+            except Exception as e:
+                print(f"DEBUG: Error in agent execution: {e}")
+                return {"messages": [AIMessage(content=f"Error processing request: {str(e)}")]}
 
         workflow = StateGraph(FloorPlanState)
         workflow.add_node("agent", call_agent)
