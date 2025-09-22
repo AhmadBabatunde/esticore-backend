@@ -215,3 +215,41 @@ async def validate_project_access(project_id: str, user_id: int):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/{project_id}")
+async def delete_project(project_id: str, user_id: int = Form(...), delete_shared_documents: bool = Form(True)):
+    """
+    Delete a project and all its associated documents
+    
+    Args:
+        project_id: The project to delete
+        user_id: User ID for ownership verification
+        delete_shared_documents: Whether to delete documents that might be shared with other projects (default: True)
+    """
+    try:
+        result = project_service.delete_project(project_id, user_id, delete_shared_documents)
+        return result
+        
+    except ValueError as e:
+        if "not found" in str(e).lower():
+            raise HTTPException(status_code=404, detail=str(e))
+        elif "access denied" in str(e).lower():
+            raise HTTPException(status_code=403, detail=str(e))
+        else:
+            raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/user/{user_id}")
+async def delete_user_projects(user_id: int):
+    """
+    Delete all projects for a specific user
+    """
+    try:
+        result = project_service.delete_user_projects(user_id)
+        return result
+        
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

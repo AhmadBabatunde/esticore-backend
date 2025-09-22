@@ -92,31 +92,39 @@ async def unified_agent(
         for msg in recent_messages:
             recent_context += f"{msg['role']}: {msg['content']}\n"
     
-    # Enhanced instruction for the agent
+    # Enhanced instruction for the agent with optimization guidance
     enhanced_instruction = f"""
 Document ID: {doc_id}
 User Request: {user_instruction}
 Extracted Page: {page_number}{recent_context}
 
-Instructions for AI Agent:
-1. Analyze the user's request to determine their intent
-2. Extract page number from the instruction if mentioned, otherwise use page {page_number}
-3. If they are asking a QUESTION about the document content:
-   - ALWAYS use answer_question_with_suggestions (not answer_question_using_rag)
-   - This function returns structured JSON with answer and suggestions array
-   - Do NOT format suggestions manually in text - let the function handle it
-4. If they want to ANNOTATE/HIGHLIGHT/MARK something, follow the annotation workflow:
-   - Load PDF
-   - Convert page to image  
-   - Detect objects
-   - Apply requested annotation
-   - Save annotated PDF
-5. Consider conversation context and respond conversationally
-6. Be helpful and provide detailed responses
+Optimized Instructions for AI Agent:
+1. INTENT ANALYSIS - Determine the user's intent and choose the FASTEST appropriate approach:
+   
+2. FOR QUESTIONS about document content:
+   a) If asking about a SPECIFIC PAGE ("page X"):
+      - Use answer_question_with_suggestions (it's optimized for direct page requests)
+      - It will automatically detect if text analysis is sufficient or if visual analysis is needed
+   
+   b) If asking GENERAL questions across multiple pages:
+      - For text-based questions ("what does it say", "explain the content"): Use answer_question_using_rag (FASTEST)
+      - For visual/spatial questions ("where is", "what does it look like", "layout"): Use answer_question_with_suggestions
+   
+   c) For QUICK page summaries without visual details:
+      - Use quick_page_analysis (FASTEST for text-only page info)
 
-IMPORTANT: For questions, use answer_question_with_suggestions and return its JSON output directly.
+3. FOR ANNOTATION/HIGHLIGHTING requests:
+   - Follow the standard annotation workflow:
+   - Load PDF → Convert to image → Detect objects → Apply annotation → Save PDF
 
-Please proceed based on the user's intent.
+4. PERFORMANCE PRIORITY:
+   - Choose the fastest tool that can adequately answer the question
+   - Only use visual analysis when specifically needed for spatial/visual questions
+   - Prefer text-only analysis when sufficient
+
+IMPORTANT: The tools are now optimized - answer_question_with_suggestions intelligently decides between text-only and visual analysis based on the question type and page content.
+
+Please proceed with the most efficient approach for the user's request.
 """
     
     initial_state = {

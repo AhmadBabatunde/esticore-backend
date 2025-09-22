@@ -453,6 +453,69 @@ def verify_detections(image_path: str, objects_json: str, requested_object: str)
     except Exception as e:
         return f"Error verifying detections: {str(e)}"
 
+@tool
+def answer_question_using_rag(doc_id: str, question: str) -> str:
+    """Fast text-only RAG for questions that don't require visual analysis."""
+    try:
+        vs = pdf_processor.load_vectorstore(doc_id)
+        docs = vs.similarity_search(question, k=4)  # Reduced for speed
+        
+        if not docs:
+            return "I couldn't find any relevant information in the document to answer your question."
+        
+        # Format the context (text only, no image analysis)
+        context = "\n\n".join([f"Page {d.metadata.get('page', 'N/A')}: {d.page_content}" for d in docs[:3]])
+        
+        # Use LLM to generate a response based on the context
+        prompt = f"""Based on the following context from the document, answer the user's question concisely.
+
+Context:
+{context}
+
+User question: {question}
+
+Provide a helpful and accurate answer:"""
+        
+        llm = ChatOpenAI(model="gpt-4o", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+        rag_response = llm.invoke(prompt)
+        
+        return rag_response.content
+        
+    except Exception as e:
+        return f"Error answering question: {str(e)}"
+
+@tool
+def quick_page_analysis(doc_id: str, page_number: int = 1) -> str:
+    """Fast text-only analysis of a specific page without image processing."""
+    try:
+        doc_info = pdf_processor.get_document_info(doc_id)
+        reader = PdfReader(doc_info["pdf_path"])
+        
+        if page_number > len(reader.pages):
+            return f"Error: Page {page_number} does not exist. Document has {len(reader.pages)} pages."
+        
+        # Extract text from the specific page
+        page = reader.pages[page_number - 1]
+        raw_text = page.extract_text()
+        
+        if not raw_text or len(raw_text.strip()) < 10:
+            return f"Page {page_number} contains primarily visual content with minimal extractable text. Consider using visual analysis for detailed information."
+        
+        # Quick text-based analysis using LLM
+        llm = ChatOpenAI(model="gpt-4o", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+        analysis_prompt = f"""Analyze the text content from this document page and provide a concise summary.
+
+Page {page_number} content:
+{raw_text}
+
+Provide a brief but informative summary of the key information on this page:"""
+        
+        response = llm.invoke(analysis_prompt)
+        return response.content
+        
+    except Exception as e:
+        return f"Error analyzing page: {str(e)}"
+
 # @tool
 # def answer_question_using_rag(doc_id: str, question: str) -> str:
 #     """Answer questions about the document using RAG (Retrieval Augmented Generation)."""
@@ -488,7 +551,7 @@ Provide a helpful and accurate answer:"""
         return f"Error answering question: {str(e)}"
 
 def analyze_pdf_page_multimodal(doc_id: str, page_number: int = 1) -> str:
-    """Analyze a specific page of a PDF using both text and visual analysis to extract comprehensive information."""
+    """Optimized multimodal analysis of a PDF page using both text and visual analysis."""
     try:
         # Get document info to find PDF path
         doc_info = pdf_processor.get_document_info(doc_id)
@@ -497,9 +560,9 @@ def analyze_pdf_page_multimodal(doc_id: str, page_number: int = 1) -> str:
         if not os.path.exists(pdf_path):
             return f"Error: PDF file not found at '{pdf_path}'"
             
-        # Convert PDF page to image for visual analysis
-        print(f"DEBUG: Converting page {page_number} to image for multimodal analysis")
-        images = convert_from_path(pdf_path, dpi=300, first_page=page_number, last_page=page_number)
+        # OPTIMIZATION: Use lower DPI for faster processing (200 instead of 300)
+        print(f"DEBUG: Converting page {page_number} to image for multimodal analysis (optimized)")
+        images = convert_from_path(pdf_path, dpi=200, first_page=page_number, last_page=page_number)
         
         if not images:
             return f"Error: Page {page_number} not found in PDF."
@@ -526,11 +589,11 @@ def analyze_pdf_page_multimodal(doc_id: str, page_number: int = 1) -> str:
         # Use multimodal LLM to analyze both image and text
         llm = ChatOpenAI(model="gpt-4o", temperature=0.0, api_key=settings.OPENAI_API_KEY)
         
-        # Create message with both image and text context
+        # OPTIMIZATION: Shorter, more focused prompt for faster processing
         message_content = [
             {
                 "type": "text",
-                "text": f"Analyze this document page in detail. Since this is a floor plan or technical drawing, focus on identifying and describing all visible elements such as rooms, walls, doors, windows, fixtures, appliances, dimensions, labels, symbols, and any other architectural or design features. Pay special attention to spatial relationships, measurements, and layout. Even if no text was extracted, carefully examine the visual elements for any readable text, numbers, or annotations.\n\nText extraction result:\n{page_text}\n\nProvide a comprehensive analysis that describes all observable elements and their relationships, noting any potential meanings of symbols or conventions used in the drawing."
+                "text": f"Analyze this document page. Describe the main visual elements, layout, rooms, doors, windows, fixtures, dimensions, labels, and text. Be concise but comprehensive.\n\nExtracted text: {page_text[:500]}\n\nProvide a focused analysis of the key elements and their relationships."
             },
             {
                 "type": "image_url",
@@ -562,18 +625,25 @@ def encode_image(image_path):
 
 @tool
 def answer_question_with_suggestions(doc_id: str, question: str) -> str:
-    """Answer questions about the document using RAG and provide related topic suggestions with page numbers."""
+    """Answer questions about the document using optimized processing with smart image analysis fallback."""
     try:
         # Check if the question is asking about a specific page
         import re
         page_match = re.search(r'\bpage\s+(\d+)\b', question.lower())
         specific_page = int(page_match.group(1)) if page_match else None
         
-        # If asking about a specific page, prioritize multimodal analysis for that page
+        # OPTIMIZATION 1: Fast text-only check first
+        # Check if we can answer the question with text alone before using image analysis
+        can_use_text_only = not any(keyword in question.lower() for keyword in [
+            'layout', 'arrangement', 'position', 'where', 'located', 'diagram', 'drawing', 
+            'plan', 'design', 'visual', 'look', 'appearance', 'orientation', 'spatial', 
+            'show', 'see', 'view', 'display', 'illustrate', 'color', 'shape', 'size'
+        ])
+        
+        # If asking about a specific page, use optimized direct analysis
         if specific_page:
             print(f"DEBUG: Direct page request detected for page {specific_page}")
             
-            # Get basic document info first
             try:
                 doc_info = pdf_processor.get_document_info(doc_id)
                 reader = PdfReader(doc_info["pdf_path"])
@@ -584,72 +654,60 @@ def answer_question_with_suggestions(doc_id: str, question: str) -> str:
                         "suggestions": []
                     })
                 
-                # Check if the page has extractable text
+                # Extract text from the specific page
                 page = reader.pages[specific_page - 1]
                 raw_text = page.extract_text()
-                has_text = raw_text and '[No text extracted:' not in raw_text
+                has_meaningful_text = raw_text and len(raw_text.strip()) > 20 and '[No text extracted:' not in raw_text
                 
-                if not has_text:
-                    # Page has no text, use multimodal analysis directly
-                    print(f"DEBUG: Page {specific_page} has no extractable text, using multimodal analysis")
-                    multimodal_result = analyze_pdf_page_multimodal(doc_id, specific_page)
+                # OPTIMIZATION 2: Use text-only analysis when possible
+                if has_meaningful_text and can_use_text_only:
+                    print(f"DEBUG: Page {specific_page} has sufficient text, using text-only analysis (FAST)")
                     
-                    return json.dumps({
-                        "answer": multimodal_result,
-                        "suggestions": [
-                            {
-                                "title": f"Page {specific_page} Details",
-                                "page": specific_page,
-                                "description": "Visual analysis of architectural elements and layout."
-                            }
-                        ]
-                    })
-                else:
-                    # Page has text, combine with multimodal analysis
-                    print(f"DEBUG: Page {specific_page} has text, combining text and visual analysis")
-                    
-                    # Get text content for this specific page
-                    context = f"Page {specific_page}: {raw_text}"
-                    
-                    # Add multimodal analysis
-                    multimodal_result = analyze_pdf_page_multimodal(doc_id, specific_page)
-                    enhanced_context = f"{context}\n\nVisual analysis:\n{multimodal_result}"
-                    
-                    # Generate answer
                     llm = ChatOpenAI(model="gpt-4o", temperature=0.0, api_key=settings.OPENAI_API_KEY)
-                    answer_prompt = f"""Based on the following context from page {specific_page}, answer the user's question.
+                    answer_prompt = f"""Based on the text content from page {specific_page}, answer the user's question.
 
-Context:
-{enhanced_context}
+Page {specific_page} content:
+{raw_text}
 
 User question: {question}
 
-Provide a comprehensive answer about page {specific_page}:"""
+Provide a comprehensive answer:"""
                     
                     rag_response = llm.invoke(answer_prompt)
                     
                     return json.dumps({
                         "answer": rag_response.content,
-                        "suggestions": [
-                            {
-                                "title": f"Page {specific_page} Content",
-                                "page": specific_page,
-                                "description": "Detailed analysis of this page's content and layout."
-                            }
-                        ]
+                        "suggestions": [{
+                            "title": f"Page {specific_page} Content",
+                            "page": specific_page,
+                            "description": "Detailed text-based analysis of this page's content."
+                        }]
                     })
+                
+                # OPTIMIZATION 3: Only use multimodal for visual questions or pages without text
+                elif not has_meaningful_text or not can_use_text_only:
+                    print(f"DEBUG: Page {specific_page} requires visual analysis - text insufficient or visual question")
+                    multimodal_result = analyze_pdf_page_multimodal(doc_id, specific_page)
                     
+                    return json.dumps({
+                        "answer": multimodal_result,
+                        "suggestions": [{
+                            "title": f"Page {specific_page} Visual Analysis",
+                            "page": specific_page,
+                            "description": "Visual analysis of architectural elements and layout."
+                        }]
+                    })
+                
             except Exception as e:
                 print(f"DEBUG: Error in direct page analysis: {e}")
-                # Fall through to regular RAG if direct analysis fails
+                # Fall through to regular processing
         
-        # Regular RAG processing for non-specific page questions
-        vs = pdf_processor.load_vectorstore(doc_id)
-        docs = vs.similarity_search(question, k=8)
+        # OPTIMIZATION 4: Smart RAG with minimal image analysis
+        # Only use RAG for multi-page questions or when specific page isn't requested
+        print(f"DEBUG: Using optimized multi-page analysis (text-focused)")
         
-        # Regular RAG processing for non-specific page questions
         vs = pdf_processor.load_vectorstore(doc_id)
-        docs = vs.similarity_search(question, k=8)
+        docs = vs.similarity_search(question, k=6)  # Reduced from 8 for speed
         
         if not docs:
             return json.dumps({
@@ -657,57 +715,54 @@ Provide a comprehensive answer about page {specific_page}:"""
                 "suggestions": []
             })
         
-        # Format the context for the main answer
-        main_docs = docs[:5]  # Use top 5 for main answer
+        # Format context from retrieved documents
+        main_docs = docs[:4]  # Reduced from 5 for speed
         context = "\n\n".join([f"Page {d.metadata.get('page', 'N/A')}: {d.page_content}" for d in main_docs])
         
-        # Use multimodal analysis for better understanding when needed
-        # Extract page numbers from retrieved documents
-        relevant_pages = list(set(doc.metadata.get('page', 1) for doc in docs))
-        
-        # For each relevant page, use multimodal analysis if the question requires visual understanding
-        # This helps when the answer depends on layout, diagrams, or visual elements
+        # OPTIMIZATION 5: Only analyze images for pages that definitely need it
+        relevant_pages = list(set(doc.metadata.get('page', 1) for doc in main_docs))
         multimodal_analysis = ""
+        
+        # Only do image analysis if:
+        # 1. Question explicitly requires visual understanding, AND
+        # 2. We found pages with no text content
+        if not can_use_text_only:
+            print(f"DEBUG: Visual question detected, checking for pages with no text")
+            
+            pages_needing_visual = []
+            doc_info = pdf_processor.get_document_info(doc_id)
+            reader = PdfReader(doc_info["pdf_path"])
+            
+            # Check only the most relevant pages (max 2 for speed)
+            for page_num in relevant_pages[:2]:
+                try:
+                    if page_num <= len(reader.pages):
+                        page = reader.pages[page_num - 1]
+                        raw_text = page.extract_text()
+                        if not raw_text or len(raw_text.strip()) < 20 or '[No text extracted:' in raw_text:
+                            pages_needing_visual.append(page_num)
+                except Exception as e:
+                    print(f"Error checking text for page {page_num}: {e}")
+            
+            # Only analyze pages that truly need visual analysis (max 1 for speed)
+            if pages_needing_visual:
+                print(f"DEBUG: Analyzing {len(pages_needing_visual[:1])} pages visually")
+                for page_num in pages_needing_visual[:1]:  # Limit to 1 page for speed
+                    try:
+                        analysis = analyze_pdf_page_multimodal(doc_id, page_num)
+                        multimodal_analysis += f"\n\nVisual analysis of page {page_num}:\n{analysis}"
+                    except Exception as e:
+                        print(f"DEBUG: Error in multimodal analysis for page {page_num}: {e}")
+                        continue
+            else:
+                print(f"DEBUG: All relevant pages have sufficient text, skipping image analysis")
+        
+        # Generate answer using available context
         llm = ChatOpenAI(model="gpt-4o", temperature=0.0, api_key=settings.OPENAI_API_KEY)
         
-        # Keywords that suggest visual/spatial understanding is needed
-        visual_keywords = ['layout', 'arrangement', 'position', 'where', 'located', 'diagram', 'drawing', 'plan', 'design', 'visual', 'look', 'appearance', 'orientation', 'spatial', 'show', 'see', 'view', 'display', 'illustrate']
-        
-        # Always perform multimodal analysis for pages with no extractable text or when visual understanding is needed
-        pages_to_analyze = []
-        
-        # Check which pages have no extractable text
-        for page_num in relevant_pages:
-            try:
-                doc_info = pdf_processor.get_document_info(doc_id)
-                reader = PdfReader(doc_info["pdf_path"])
-                page = reader.pages[page_num - 1]
-                raw_text = page.extract_text()
-                if not raw_text or '[No text extracted:' in raw_text:
-                    pages_to_analyze.append(page_num)
-            except Exception as e:
-                print(f"Error checking text extraction for page {page_num}: {e}")
-                pages_to_analyze.append(page_num)
-        
-        # Add pages that require visual understanding
-        if any(keyword in question.lower() for keyword in visual_keywords):
-            for page_num in relevant_pages:
-                if page_num not in pages_to_analyze and len(pages_to_analyze) < 3:
-                    pages_to_analyze.append(page_num)
-        
-        # Perform multimodal analysis on identified pages (limit to 3 to avoid excessive calls)
-        for page_num in pages_to_analyze[:3]:
-            try:
-                analysis = analyze_pdf_page_multimodal(doc_id, page_num)
-                multimodal_analysis += f"\n\nVisual analysis of page {page_num} (contains primarily visual content):\n{analysis}"
-            except Exception as e:
-                print(f"DEBUG: Error in multimodal analysis for page {page_num}: {e}")
-                continue
-        
-        # Create enhanced prompt with multimodal context if available
         enhanced_context = context
         if multimodal_analysis:
-            enhanced_context += f"\n\nAdditional visual analysis:\n{multimodal_analysis}"
+            enhanced_context += f"\n\nAdditional visual analysis:{multimodal_analysis}"
             
         answer_prompt = f"""Based on the following context from the document, answer the user's question.
 
@@ -716,142 +771,28 @@ Context:
 
 User question: {question}
 
-Provide a helpful and accurate answer that incorporates both textual and visual information when relevant:"""
+Provide a helpful and accurate answer:"""
         
         rag_response = llm.invoke(answer_prompt)
         
-        # Generate topic suggestions from all retrieved documents
-        all_pages_content = {}
-        for doc in docs:
-            page_num = doc.metadata.get('page', 1)  # Default to page 1 if N/A
-            if page_num not in all_pages_content:
-                all_pages_content[page_num] = []
-            all_pages_content[page_num].append(doc.page_content)
-        
-        print(f"DEBUG: Documents from {len(all_pages_content)} pages for suggestions")
-        
-        # Create suggestions prompt with page-organized content
-        suggestions_context = "\n\n".join([
-            f"Page {page}: {' '.join(contents)}" 
-            for page, contents in all_pages_content.items()
-        ])
-        
-        suggestions_prompt = f"""Based on the following document content and the user's question, identify 3-5 related topics that the user might be interested in exploring further.
-
-Document content:
-{suggestions_context}
-
-User question: {question}
-
-For each related topic, provide:
-1. A clear, concise topic title (2-6 words)
-2. The page number where this topic can be found (use the page numbers from the context above)
-3. A brief description (1-2 sentences)
-
-Even if the content seems limited, try to identify at least 2-3 related topics based on the available content.
-
-Format your response as a JSON array of objects with keys: "title", "page", "description".
-
-Example format:
-[
-  {{
-    "title": "AI Tool Usage",
-    "page": 1,
-    "description": "Instructions on how to use different AI annotation tools."
-  }},
-  {{
-    "title": "Washroom Features",
-    "page": 1,
-    "description": "Details about washroom layouts and identification."
-  }}
-]
-
-Provide only the JSON array, no additional text:"""
-        
-        suggestions_response = llm.invoke(suggestions_prompt)
-        print(f"DEBUG: Suggestions LLM response: {suggestions_response.content}")
-        
-        # Parse suggestions JSON with improved error handling
+        # Generate lightweight suggestions (reduced complexity)
         suggestions = []
-        try:
-            # Try to extract JSON from the response
-            response_content = suggestions_response.content.strip()
-            
-            # Look for JSON array in the response
-            json_start = response_content.find('[')
-            json_end = response_content.rfind(']') + 1
-            
-            if json_start != -1 and json_end != -1:
-                json_str = response_content[json_start:json_end]
-                suggestions = json.loads(json_str)
-                
-            if not isinstance(suggestions, list):
-                suggestions = []
-                
-        except json.JSONDecodeError as e:
-            print(f"DEBUG: JSON parsing error: {e}")
-            print(f"DEBUG: Raw response: {suggestions_response.content}")
-            suggestions = []
+        for i, page_num in enumerate(relevant_pages[:3]):  # Max 3 suggestions
+            suggestions.append({
+                "title": f"Page {page_num} Content",
+                "page": page_num,
+                "description": f"Additional information available on page {page_num}."
+            })
         
-        # Process suggestions with more lenient validation
-        valid_suggestions = []
-        for suggestion in suggestions:
-            if isinstance(suggestion, dict):
-                # Ensure required keys exist with defaults
-                title = suggestion.get('title', 'Related Topic')
-                page = suggestion.get('page', 1)
-                description = suggestion.get('description', 'Additional information available.')
-                
-                # Convert page to integer if possible
-                try:
-                    if isinstance(page, str) and page.lower() != 'n/a':
-                        page = int(page)
-                    elif isinstance(page, str):
-                        page = 1  # Default for N/A
-                    elif not isinstance(page, int):
-                        page = 1
-                        
-                    valid_suggestion = {
-                        "title": str(title)[:50],  # Limit title length
-                        "page": page,
-                        "description": str(description)[:200]  # Limit description length
-                    }
-                    valid_suggestions.append(valid_suggestion)
-                    
-                except (ValueError, TypeError):
-                    # If page conversion fails, skip this suggestion
-                    continue
-        
-        print(f"DEBUG: Valid suggestions count: {len(valid_suggestions)}")
-        
-        # If no valid suggestions were generated, create fallback suggestions based on content
-        if len(valid_suggestions) == 0 and docs:
-            print("DEBUG: No valid suggestions generated, creating fallback suggestions")
-            # Create basic suggestions based on available pages
-            available_pages = set(doc.metadata.get('page', 1) for doc in docs)
-            
-            fallback_suggestions = []
-            for page in sorted(available_pages):
-                if len(fallback_suggestions) < 3:  # Limit to 3 fallback suggestions
-                    fallback_suggestions.append({
-                        "title": f"Page {page} Content",
-                        "page": page,
-                        "description": f"Additional information and details available on page {page}."
-                    })
-            
-            valid_suggestions = fallback_suggestions
-        
-        result = {
+        return json.dumps({
             "answer": rag_response.content,
-            "suggestions": valid_suggestions[:5]  # Limit to 5 suggestions
-        }
-        
-        return json.dumps(result, indent=2)
+            "suggestions": suggestions
+        })
         
     except Exception as e:
-        print(f"DEBUG: Error in answer_question_with_suggestions: {str(e)}")
+        print(f"DEBUG: Error in optimized answer_question_with_suggestions: {str(e)}")
         return json.dumps({
-            "answer": f"Error answering question: {str(e)}",
+            "answer": f"Error processing question: {str(e)}",
             "suggestions": []
         })
 
@@ -921,6 +862,7 @@ ALL_TOOLS = [
     apply_count_annotation,
     apply_arrow_annotation,
     save_annotated_image_as_pdf_page,
-    answer_question_using_rag,
-    answer_question_with_suggestions
+    answer_question_using_rag,  # Fast text-only RAG
+    answer_question_with_suggestions,  # Optimized smart analysis
+    quick_page_analysis  # Fast text-only page analysis
 ]

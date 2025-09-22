@@ -156,15 +156,52 @@ async def query_document(doc_id: str, question: str = Form(...), k: int = Form(5
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/{doc_id}")
-def delete_document(doc_id: str):
+def delete_document(doc_id: str, user_id: int = None):
     """
     Delete a document and all associated files (PDF and vectors)
+    Optionally verify user ownership
     """
     try:
+        # If user_id is provided, verify ownership
+        if user_id is not None:
+            doc_info = pdf_processor.get_document_info(doc_id)
+            if doc_info.get("user_id") != user_id:
+                raise HTTPException(status_code=403, detail="Access denied: You don't own this document")
+        
         success = pdf_processor.delete_document_files(doc_id)
         if success:
             return {"message": "Document deleted successfully", "doc_id": doc_id}
         else:
             raise HTTPException(status_code=500, detail="Failed to delete document completely")
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Document not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/user/{user_id}")
+def delete_user_documents(user_id: int):
+    """
+    Delete all documents for a specific user
+    """
+    try:
+        documents = pdf_processor.list_documents(user_id)
+        deleted_count = 0
+        failed_deletions = []
+        
+        for doc_id, doc_info in documents.items():
+            try:
+                success = pdf_processor.delete_document_files(doc_id)
+                if success:
+                    deleted_count += 1
+                else:
+                    failed_deletions.append({"doc_id": doc_id, "filename": doc_info["filename"]})
+            except Exception as e:
+                failed_deletions.append({"doc_id": doc_id, "filename": doc_info["filename"], "error": str(e)})
+        
+        return {
+            "message": f"Deleted {deleted_count} documents for user {user_id}",
+            "deleted_count": deleted_count,
+            "failed_deletions": failed_deletions
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

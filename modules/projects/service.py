@@ -255,6 +255,130 @@ class ProjectService:
         """Check if a user has access to a project"""
         project = self.db.get_project_by_id(project_id)
         return project is not None and project.user_id == user_id
+    
+    def delete_project(self, project_id: str, user_id: int = None, delete_shared_documents: bool = True) -> Dict[str, Any]:
+        """Delete a project and its associated documents
+        
+        Args:
+            project_id: The project to delete
+            user_id: User ID for ownership verification (optional)
+            delete_shared_documents: Whether to delete documents that might be shared with other projects
+        """
+        # Check if project exists
+        project = self.db.get_project_by_id(project_id)
+        if not project:
+            raise ValueError("Project not found")
+        
+        # Verify user access if user_id is provided
+        if user_id is not None and project.user_id != user_id:
+            raise ValueError("Access denied: You don't own this project")
+        
+        try:
+            # Get all documents associated with this project
+            documents = self.db.get_project_documents(project_id)
+            
+            deleted_documents = []
+            failed_document_deletions = []
+            skipped_shared_documents = []
+            
+            # Delete associated documents
+            for doc in documents:
+                try:
+                    # Check if document is shared with other projects
+                    doc_projects = self.db.get_document_projects(doc.doc_id)
+                    is_shared = len(doc_projects) > 1
+                    
+                    if is_shared and not delete_shared_documents:
+                        # Skip deletion of shared document, just remove from project
+                        self.db.remove_document_from_project(project_id, doc.doc_id)
+                        skipped_shared_documents.append({
+                            "doc_id": doc.doc_id,
+                            "filename": doc.filename,
+                            "reason": "Document is shared with other projects"
+                        })
+                    else:
+                        # Delete the document completely
+                        success = pdf_processor.delete_document_files(doc.doc_id)
+                        if success:
+                            deleted_documents.append({
+                                "doc_id": doc.doc_id,
+                                "filename": doc.filename,
+                                "was_shared": is_shared
+                            })
+                        else:
+                            failed_document_deletions.append({
+                                "doc_id": doc.doc_id,
+                                "filename": doc.filename,
+                                "error": "Failed to delete document files",
+                                "was_shared": is_shared
+                            })
+                except Exception as e:
+                    failed_document_deletions.append({
+                        "doc_id": doc.doc_id,
+                        "filename": doc.filename,
+                        "error": str(e),
+                        "was_shared": "unknown"
+                    })
+            
+            # Delete project from database (this will cascade delete project_documents entries)
+            project_deleted = self.db.delete_project(project_id)
+            
+            if not project_deleted:
+                raise ValueError("Failed to delete project from database")
+            
+            return {
+                "message": "Project deleted successfully",
+                "project_id": project_id,
+                "project_name": project.name,
+                "deleted_documents": deleted_documents,
+                "failed_document_deletions": failed_document_deletions,
+                "skipped_shared_documents": skipped_shared_documents,
+                "total_documents_processed": len(documents),
+                "delete_shared_documents": delete_shared_documents
+            }
+            
+        except Exception as e:
+            raise ValueError(f"Failed to delete project: {str(e)}")
+    
+    def delete_user_projects(self, user_id: int) -> Dict[str, Any]:
+        """Delete all projects for a user"""
+        try:
+            projects = self.db.get_user_projects(user_id)
+            
+            deleted_projects = []
+            failed_project_deletions = []
+            total_documents_deleted = 0
+            total_document_failures = 0
+            
+            for project in projects:
+                try:
+                    result = self.delete_project(project.project_id, user_id)
+                    deleted_projects.append({
+                        "project_id": project.project_id,
+                        "project_name": project.name,
+                        "documents_deleted": len(result["deleted_documents"]),
+                        "document_failures": len(result["failed_document_deletions"])
+                    })
+                    total_documents_deleted += len(result["deleted_documents"])
+                    total_document_failures += len(result["failed_document_deletions"])
+                except Exception as e:
+                    failed_project_deletions.append({
+                        "project_id": project.project_id,
+                        "project_name": project.name,
+                        "error": str(e)
+                    })
+            
+            return {
+                "message": f"Processed {len(projects)} projects for user {user_id}",
+                "user_id": user_id,
+                "deleted_projects": deleted_projects,
+                "failed_project_deletions": failed_project_deletions,
+                "total_documents_deleted": total_documents_deleted,
+                "total_document_failures": total_document_failures
+            }
+            
+        except Exception as e:
+            raise ValueError(f"Failed to delete user projects: {str(e)}")
 
 # Global project service instance
 project_service = ProjectService()

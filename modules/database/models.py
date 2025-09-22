@@ -1049,6 +1049,20 @@ class DatabaseManager:
         finally:
             conn.close()
     
+    def delete_project(self, project_id: str) -> bool:
+        """Delete a project record (cascades to project_documents)"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(f"DELETE FROM projects WHERE project_id = {placeholder}", (project_id,))
+            conn.commit()
+            return cur.rowcount > 0
+            
+        finally:
+            conn.close()
+    
     # Project-Document relationship methods
     def add_document_to_project(self, project_id: str, doc_id: str) -> bool:
         """Add a document to a project"""
