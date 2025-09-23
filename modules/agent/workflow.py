@@ -8,8 +8,10 @@ from typing import Dict, Any, List
 from dataclasses import dataclass, field
 
 from langchain_openai import ChatOpenAI
-from langgraph.prebuilt import create_react_agent, ToolNode
-from langgraph.graph import StateGraph, MessagesState, END
+from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langgraph.graph import StateGraph, START, END
+from langgraph.prebuilt import ToolNode
+from langgraph.graph import MessagesState
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
 
@@ -134,44 +136,61 @@ class AgentWorkflow:
     """Agent workflow management"""
     
     def __init__(self):
+        self.memory = SimpleMemory()
         self.chat_sessions = ChatSession()
         
-        # Initialize memory manager for long-term memory
-        from modules.config.memory import MemoryManager
-        self.memory_manager = MemoryManager()
-        
-        # Initialize agent with React pattern and memory tools
+        # Initialize agent
         self.llm = ChatOpenAI(model="gpt-4o", temperature=0.0, api_key=settings.OPENAI_API_KEY)
-        self.agent_executor = create_react_agent(
-            self.llm,
-            tools=ALL_TOOLS + self.memory_manager.get_memory_tools(),
-            store=self.memory_manager.get_store(),
-            prompt=self._create_prompt()
-        )
+        self.agent = create_tool_calling_agent(self.llm, ALL_TOOLS, self._create_prompt())
+        self.agent_executor = AgentExecutor(agent=self.agent, tools=ALL_TOOLS, verbose=True)
         
         # Initialize LangGraph workflow
         self.workflow = self._create_workflow()
         self.compiled_graph = self.workflow.compile()
     
     def _create_prompt(self):
-        """Create the agent prompt template with memory context"""
-        
-        def prompt(state):
-            # Get user_id from state or use default
-            config = state.get("config", {})
-            configurable = config.get("configurable", {})
-            user_id = configurable.get("user_id", "default_user")
-            
-            # Search over memories based on the messages
-            store = self.memory_manager.get_store()
-            namespace = ("agent_memories", user_id)
-            items = store.search(namespace, query=state["messages"][-1].content)
-            memories = "\n\n".join(str(item.value) for item in items)
-            
-            system_msg = {"role": "system", "content": f"## Memories:\n\n{memories}"}
-            return [system_msg] + state["messages"]
-            
-        return prompt
+        """Create the agent prompt template"""
+        return ChatPromptTemplate.from_messages([
+            ("system", """You are an expert Civil Engeneering AI assistant for working with floor plan documents. You can both answer questions about the documents and annotate specific pages.
+
+**Workflow for Annotation Requests:**
+1.  **Load & Validate PDF**: Use `load_pdf_for_floorplan` to check the PDF.
+2.  **Convert Specific Page to Image**: Use `convert_pdf_page_to_image` with the specified page number.
+3.  **Detect Objects**: Use `detect_floor_plan_objects` to get a JSON list of all objects and their bounding boxes.
+4.  **Verify Detections (If Needed)**: If the user asks for a specific object type, call `verify_detections` to check if that object type was found.
+5.  **Apply Annotation**: Call the appropriate annotation tool based on the user's request.
+6.  **Save Final PDF**: ALWAYS use `save_annotated_image_as_pdf_page` to save the annotated page and merge it with the original PDF. Use the output_path from the state.
+
+**Workflow for Question Answering:**
+1.  **Answer Questions with Suggestions**: ALWAYS use `answer_question_with_suggestions` to answer questions about the document content and provide related topic suggestions with page numbers. This returns structured JSON.
+2.  **Fallback**: Only use `answer_question_using_rag` if the enhanced function fails.
+
+**Important for Questions**: When answering questions, you MUST use `answer_question_with_suggestions` and return its JSON output directly without modification.
+
+**Intent Detection:**
+- If the user asks a question about the document content (e.g., "what's on page 3", "tell me about the kitchen"), use the RAG tool.
+- If the user requests an annotation (e.g., "highlight doors on page 2", "circle all windows"), follow the annotation workflow.
+- If the user's intent is unclear, ask for clarification.
+
+**Crucial Instructions:**
+- Always determine the user's intent first.
+- For annotation requests, follow the complete sequence INCLUDING the save step.
+- ALWAYS call `save_annotated_image_as_pdf_page` at the end of any annotation workflow.
+- For question answering, use the RAG tool directly.
+- When a user asks to annotate specific items, verify the detections first.
+- Only call one annotation tool per request.
+- The final output for annotation should be a complete PDF with only the specified page annotated.
+- When saving, use the exact output_path provided in the state.
+
+**State Information:**
+You have access to:
+- pdf_path: The path to the original PDF
+- page_number: The specific page to work on
+- output_path: Where to save the final annotated PDF (ALWAYS use this exact path)
+"""),
+            MessagesPlaceholder(variable_name="messages"),
+            MessagesPlaceholder(variable_name="agent_scratchpad"),
+        ])
     
     def _create_workflow(self):
         """Create the LangGraph workflow"""
@@ -179,6 +198,9 @@ class AgentWorkflow:
             return "action" if state["messages"][-1].tool_calls else END
 
         def call_agent(state: FloorPlanState):
+            # Add memory context to the state
+            memory_context = self.memory.load_memory_variables({})
+            
             # Create a more detailed message that includes state information
             original_message = state["messages"][-1].content if state["messages"] else ""
             
@@ -202,35 +224,16 @@ class AgentWorkflow:
             state_with_context = state.copy()
             state_with_context["messages"] = state["messages"][:-1] + [HumanMessage(content=context_message)]
             
-            # Get user_id from config for memory operations
-            config = state.get("config", {})
-            configurable = config.get("configurable", {})
-            user_id = configurable.get("user_id", "default_user")
+            if memory_context and "history" in memory_context and memory_context["history"]:
+                # Add memory to the conversation
+                state_with_context["messages"].append(HumanMessage(content=f"Memory context: {memory_context['history']}"))
             
-            # Set up configuration with user_id for memory tools
-            agent_config = {
-                "configurable": {
-                    "user_id": user_id
-                }
-            }
+            response = self.agent_executor.invoke(state_with_context)
             
-            # Invoke the agent executor with the updated state and config
-            try:
-                response = self.agent_executor.invoke(
-                    state_with_context,
-                    config=agent_config
-                )
-                
-                # Handle response format properly
-                if isinstance(response, dict) and "messages" in response:
-                    return {"messages": [AIMessage(content=response["messages"][-1].content)]}
-                else:
-                    # Fallback for different response formats
-                    return {"messages": [AIMessage(content=str(response))]}
-                    
-            except Exception as e:
-                print(f"DEBUG: Error in agent execution: {e}")
-                return {"messages": [AIMessage(content=f"Error processing request: {str(e)}")]}
+            # Save to memory
+            self.memory.save_context({"input": original_message}, {"output": response["output"]})
+            
+            return {"messages": [AIMessage(content=response["output"])]}
 
         workflow = StateGraph(FloorPlanState)
         workflow.add_node("agent", call_agent)

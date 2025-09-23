@@ -253,6 +253,105 @@ class PDFProcessor:
         except Exception as e:
             raise ValueError(f"Query failed: {str(e)}")
     
+    def query_document_with_citations(self, doc_id: str, question: str, k: int = 5) -> dict:
+        """Query document using RAG with detailed citation information"""
+        # Check if document exists in database
+        document = db_manager.get_document_by_doc_id(doc_id)
+        if not document:
+            raise FileNotFoundError("Document not found")
+        
+        # Check if PDF file exists
+        if not os.path.exists(document.pdf_path):
+            db_manager.update_document_status(doc_id, "missing_pdf")
+            raise FileNotFoundError("PDF file not found")
+        
+        # Check if vector store exists
+        if not os.path.exists(document.vector_path):
+            db_manager.update_document_status(doc_id, "missing_vectors")
+            raise FileNotFoundError("Vector store not found")
+        
+        try:
+            vs = self.load_vectorstore(doc_id)
+            docs = vs.similarity_search_with_score(question, k=int(k))
+            
+            # Process documents and organize by page
+            citations_by_page = {}
+            all_citations = []
+            
+            for i, (doc, score) in enumerate(docs):
+                page_num = doc.metadata.get("page", 1)
+                citation = {
+                    "id": i + 1,
+                    "page": page_num,
+                    "text": doc.page_content,
+                    "relevance_score": float(score),
+                    "doc_id": doc_id
+                }
+                
+                all_citations.append(citation)
+                
+                if page_num not in citations_by_page:
+                    citations_by_page[page_num] = []
+                citations_by_page[page_num].append(citation)
+            
+            # Find the most referenced page (page with most chunks)
+            most_referenced_page = None
+            max_citations = 0
+            
+            if citations_by_page:
+                for page_num, page_citations in citations_by_page.items():
+                    if len(page_citations) > max_citations:
+                        max_citations = len(page_citations)
+                        most_referenced_page = page_num
+            
+            return {
+                "doc_id": doc_id,
+                "question": question,
+                "citations": all_citations,
+                "citations_by_page": citations_by_page,
+                "most_referenced_page": most_referenced_page,
+                "total_citations": len(all_citations),
+                "pages_referenced": list(citations_by_page.keys()) if citations_by_page else []
+            }
+        except Exception as e:
+            raise ValueError(f"Query failed: {str(e)}")
+    
+    def get_page_citations_summary(self, doc_id: str, question: str, k: int = 8) -> dict:
+        """Get a summary of which pages are most relevant to a query"""
+        try:
+            result = self.query_document_with_citations(doc_id, question, k)
+            
+            # Count citations per page and calculate relevance scores
+            page_summary = {}
+            for page_num, citations in result["citations_by_page"].items():
+                total_relevance = sum(c["relevance_score"] for c in citations)
+                avg_relevance = total_relevance / len(citations) if citations else 0
+                
+                page_summary[page_num] = {
+                    "page": page_num,
+                    "citation_count": len(citations),
+                    "total_relevance_score": total_relevance,
+                    "avg_relevance_score": avg_relevance,
+                    "citations": citations
+                }
+            
+            # Sort pages by citation count, then by average relevance
+            sorted_pages = sorted(
+                page_summary.values(),
+                key=lambda x: (x["citation_count"], x["avg_relevance_score"]),
+                reverse=True
+            )
+            
+            return {
+                "doc_id": doc_id,
+                "question": question,
+                "most_relevant_page": sorted_pages[0]["page"] if sorted_pages else None,
+                "page_rankings": sorted_pages,
+                "total_pages_referenced": len(sorted_pages)
+            }
+        except Exception as e:
+            raise ValueError(f"Citation summary failed: {str(e)}")
+    
     def delete_document_files(self, doc_id: str) -> bool:
         """Delete both PDF and vector files for a document"""
         success = True

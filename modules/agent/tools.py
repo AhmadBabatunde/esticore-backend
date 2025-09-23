@@ -516,21 +516,62 @@ Provide a brief but informative summary of the key information on this page:"""
     except Exception as e:
         return f"Error analyzing page: {str(e)}"
 
-# @tool
-# def answer_question_using_rag(doc_id: str, question: str) -> str:
-#     """Answer questions about the document using RAG (Retrieval Augmented Generation)."""
 @tool
 def answer_question_using_rag(doc_id: str, question: str) -> str:
-    """Answer questions about the document using RAG (Retrieval Augmented Generation)."""
+    """Answer questions about the document using RAG (Retrieval Augmented Generation) with citations."""
     try:
-        vs = pdf_processor.load_vectorstore(doc_id)
-        docs = vs.similarity_search(question, k=5)
+        # Get citations and context
+        try:
+            citation_result = pdf_processor.query_document_with_citations(doc_id, question, k=5)
+            citations = citation_result.get("citations", [])
+            page_summary = pdf_processor.get_page_citations_summary(doc_id, question, k=5)
+            most_referenced_page = page_summary.get("most_relevant_page")
+        except Exception as e:
+            print(f"DEBUG: Error getting citations, falling back to basic RAG: {e}")
+            # Fallback to basic processing
+            vs = pdf_processor.load_vectorstore(doc_id)
+            docs = vs.similarity_search(question, k=5)
+            
+            if not docs:
+                return json.dumps({
+                    "answer": "I couldn't find any relevant information in the document to answer your question.",
+                    "citations": [],
+                    "most_referenced_page": None
+                })
+            
+            # Create basic citations from docs
+            citations = []
+            for i, doc in enumerate(docs):
+                citations.append({
+                    "id": i + 1,
+                    "page": doc.metadata.get("page", 1),
+                    "text": doc.page_content,
+                    "relevance_score": 0.8,  # Default score
+                    "doc_id": doc_id
+                })
+            
+            # Find most referenced page
+            page_counts = {}
+            for citation in citations:
+                page = citation["page"]
+                page_counts[page] = page_counts.get(page, 0) + 1
+            
+            most_referenced_page = max(page_counts.items(), key=lambda x: x[1])[0] if page_counts else None
         
-        if not docs:
-            return "I couldn't find any relevant information in the document to answer your question."
+        if not citations:
+            return json.dumps({
+                "answer": "I couldn't find any relevant information in the document to answer your question.",
+                "citations": [],
+                "most_referenced_page": None
+            })
         
-        # Format the context
-        context = "\n\n".join([f"Page {d.metadata.get('page', 'N/A')}: {d.page_content}" for d in docs])
+        # Format the context from citations
+        context = "\n\n".join([f"Page {c['page']}: {c['text']}" for c in citations[:4]])
+        
+        # Create citation references for the prompt
+        citation_text = "\n\nCitation references:\n"
+        for citation in citations[:4]:  # Include up to 4 citations
+            citation_text += f"[{citation['id']}] Page {citation['page']}\n"
         
         # Use LLM to generate a response based on the context
         prompt = f"""Based on the following context from the document, answer the user's question.
@@ -540,15 +581,34 @@ Context:
 
 User question: {question}
 
-Provide a helpful and accurate answer:"""
+Provide a helpful and accurate answer. IMPORTANT: Include citation references in your response using the format [1], [2], etc. to reference the source pages. Add a citations section at the end listing the page numbers.
+
+Available citations:
+{citation_text}"""
         
         llm = ChatOpenAI(model="gpt-4o", temperature=0.0, api_key=settings.OPENAI_API_KEY)
         rag_response = llm.invoke(prompt)
         
-        return rag_response.content
+        # Ensure the response includes proper citations by adding them if missing
+        response_text = rag_response.content
+        if not any(f"[{i}]" in response_text for i in range(1, 5)):
+            # If no citations were included, add them at the end
+            response_text += "\n\nSources:"
+            for citation in citations[:3]:  # Show top 3 sources
+                response_text += f"\n- Page {citation['page']}"
+        
+        return json.dumps({
+            "answer": response_text,
+            "citations": citations,
+            "most_referenced_page": most_referenced_page
+        })
         
     except Exception as e:
-        return f"Error answering question: {str(e)}"
+        return json.dumps({
+            "answer": f"Error answering question: {str(e)}",
+            "citations": [],
+            "most_referenced_page": None
+        })
 
 def analyze_pdf_page_multimodal(doc_id: str, page_number: int = 1) -> str:
     """Optimized multimodal analysis of a PDF page using both text and visual analysis."""
@@ -625,7 +685,7 @@ def encode_image(image_path):
 
 @tool
 def answer_question_with_suggestions(doc_id: str, question: str) -> str:
-    """Answer questions about the document using optimized processing with smart image analysis fallback."""
+    """Answer questions about the document using optimized processing with smart image analysis fallback and citations."""
     try:
         # Check if the question is asking about a specific page
         import re
@@ -651,7 +711,9 @@ def answer_question_with_suggestions(doc_id: str, question: str) -> str:
                 if specific_page > len(reader.pages):
                     return json.dumps({
                         "answer": f"Error: Page {specific_page} does not exist. Document has {len(reader.pages)} pages.",
-                        "suggestions": []
+                        "suggestions": [],
+                        "citations": [],
+                        "most_referenced_page": None
                     })
                 
                 # Extract text from the specific page
@@ -671,9 +733,18 @@ Page {specific_page} content:
 
 User question: {question}
 
-Provide a comprehensive answer:"""
+Provide a comprehensive answer and include a citation reference at the end in the format: [Source: Page {specific_page}]"""
                     
                     rag_response = llm.invoke(answer_prompt)
+                    
+                    # Create a simple citation for this page
+                    citation = {
+                        "id": 1,
+                        "page": specific_page,
+                        "text": raw_text[:200] + "..." if len(raw_text) > 200 else raw_text,
+                        "relevance_score": 1.0,
+                        "doc_id": doc_id
+                    }
                     
                     return json.dumps({
                         "answer": rag_response.content,
@@ -681,7 +752,9 @@ Provide a comprehensive answer:"""
                             "title": f"Page {specific_page} Content",
                             "page": specific_page,
                             "description": "Detailed text-based analysis of this page's content."
-                        }]
+                        }],
+                        "citations": [citation],
+                        "most_referenced_page": specific_page
                     })
                 
                 # OPTIMIZATION 3: Only use multimodal for visual questions or pages without text
@@ -689,38 +762,87 @@ Provide a comprehensive answer:"""
                     print(f"DEBUG: Page {specific_page} requires visual analysis - text insufficient or visual question")
                     multimodal_result = analyze_pdf_page_multimodal(doc_id, specific_page)
                     
+                    # Add citation reference to visual analysis
+                    visual_result_with_citation = f"{multimodal_result}\n\n[Source: Page {specific_page} - Visual Analysis]"
+                    
+                    # Create a simple citation for visual analysis
+                    citation = {
+                        "id": 1,
+                        "page": specific_page,
+                        "text": "Visual analysis of page content",
+                        "relevance_score": 1.0,
+                        "doc_id": doc_id
+                    }
+                    
                     return json.dumps({
-                        "answer": multimodal_result,
+                        "answer": visual_result_with_citation,
                         "suggestions": [{
                             "title": f"Page {specific_page} Visual Analysis",
                             "page": specific_page,
                             "description": "Visual analysis of architectural elements and layout."
-                        }]
+                        }],
+                        "citations": [citation],
+                        "most_referenced_page": specific_page
                     })
                 
             except Exception as e:
                 print(f"DEBUG: Error in direct page analysis: {e}")
                 # Fall through to regular processing
         
-        # OPTIMIZATION 4: Smart RAG with minimal image analysis
+        # OPTIMIZATION 4: Smart RAG with minimal image analysis and citations
         # Only use RAG for multi-page questions or when specific page isn't requested
-        print(f"DEBUG: Using optimized multi-page analysis (text-focused)")
+        print(f"DEBUG: Using optimized multi-page analysis with citations (text-focused)")
         
-        vs = pdf_processor.load_vectorstore(doc_id)
-        docs = vs.similarity_search(question, k=6)  # Reduced from 8 for speed
+        # Get citations and page summary
+        try:
+            citation_result = pdf_processor.query_document_with_citations(doc_id, question, k=6)
+            page_summary = pdf_processor.get_page_citations_summary(doc_id, question, k=6)
+            most_referenced_page = page_summary.get("most_relevant_page")
+            
+            citations = citation_result.get("citations", [])
+            print(f"DEBUG: Found {len(citations)} citations across {len(citation_result.get('pages_referenced', []))} pages")
+            
+        except Exception as e:
+            print(f"DEBUG: Error getting citations, falling back to regular RAG: {e}")
+            # Fallback to regular processing without citations
+            vs = pdf_processor.load_vectorstore(doc_id)
+            docs = vs.similarity_search(question, k=6)
+            citations = []
+            most_referenced_page = None
+            
+            if docs:
+                for i, doc in enumerate(docs):
+                    citations.append({
+                        "id": i + 1,
+                        "page": doc.metadata.get("page", 1),
+                        "text": doc.page_content,
+                        "relevance_score": 0.8,  # Default score
+                        "doc_id": doc_id
+                    })
+                
+                # Find most referenced page
+                page_counts = {}
+                for citation in citations:
+                    page = citation["page"]
+                    page_counts[page] = page_counts.get(page, 0) + 1
+                
+                if page_counts:
+                    most_referenced_page = max(page_counts.items(), key=lambda x: x[1])[0]
         
-        if not docs:
+        if not citations:
             return json.dumps({
                 "answer": "I couldn't find any relevant information in the document to answer your question.",
-                "suggestions": []
+                "suggestions": [],
+                "citations": [],
+                "most_referenced_page": None
             })
         
-        # Format context from retrieved documents
-        main_docs = docs[:4]  # Reduced from 5 for speed
-        context = "\n\n".join([f"Page {d.metadata.get('page', 'N/A')}: {d.page_content}" for d in main_docs])
+        # Format context from citations
+        main_citations = citations[:4]  # Reduced from 5 for speed
+        context = "\n\n".join([f"Page {c['page']}: {c['text']}" for c in main_citations])
         
         # OPTIMIZATION 5: Only analyze images for pages that definitely need it
-        relevant_pages = list(set(doc.metadata.get('page', 1) for doc in main_docs))
+        relevant_pages = list(set(c["page"] for c in main_citations))
         multimodal_analysis = ""
         
         # Only do image analysis if:
@@ -763,6 +885,11 @@ Provide a comprehensive answer:"""
         enhanced_context = context
         if multimodal_analysis:
             enhanced_context += f"\n\nAdditional visual analysis:{multimodal_analysis}"
+        
+        # Create citation references for the prompt
+        citation_text = "\n\nCitation references:\n"
+        for citation in citations[:5]:  # Include up to 5 citations
+            citation_text += f"[{citation['id']}] Page {citation['page']}\n"
             
         answer_prompt = f"""Based on the following context from the document, answer the user's question.
 
@@ -771,9 +898,20 @@ Context:
 
 User question: {question}
 
-Provide a helpful and accurate answer:"""
+Provide a helpful and accurate answer. IMPORTANT: Include citation references in your response using the format [1], [2], etc. to reference the source pages. Add a citations section at the end listing the page numbers.
+
+Available citations:
+{citation_text}"""
         
         rag_response = llm.invoke(answer_prompt)
+        
+        # Ensure the response includes proper citations by adding them if missing
+        response_text = rag_response.content
+        if not any(f"[{i}]" in response_text for i in range(1, 6)):
+            # If no citations were included, add them at the end
+            response_text += "\n\nSources:"
+            for citation in citations[:3]:  # Show top 3 sources
+                response_text += f"\n- Page {citation['page']}"
         
         # Generate lightweight suggestions (reduced complexity)
         suggestions = []
@@ -785,15 +923,19 @@ Provide a helpful and accurate answer:"""
             })
         
         return json.dumps({
-            "answer": rag_response.content,
-            "suggestions": suggestions
+            "answer": response_text,
+            "suggestions": suggestions,
+            "citations": citations,
+            "most_referenced_page": most_referenced_page
         })
         
     except Exception as e:
         print(f"DEBUG: Error in optimized answer_question_with_suggestions: {str(e)}")
         return json.dumps({
             "answer": f"Error processing question: {str(e)}",
-            "suggestions": []
+            "suggestions": [],
+            "citations": [],
+            "most_referenced_page": None
         })
 
 @tool

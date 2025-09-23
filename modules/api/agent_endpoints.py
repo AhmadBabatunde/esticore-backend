@@ -168,13 +168,16 @@ Please proceed with the most efficient approach for the user's request.
             
             # Try to parse the response for suggestions
             suggestions = []
+            citations = []
+            most_referenced_page = None
             answer_text = final_msg
             
             # Check if the response contains JSON from answer_question_with_suggestions
             try:
                 # Look for JSON pattern in the response - try multiple patterns
                 json_patterns = [
-                    r'\{.*"answer".*"suggestions".*\}',  # Full JSON object
+                    r'\{.*"answer".*"suggestions".*\}',  # Full JSON object with suggestions
+                    r'\{.*"answer".*"citations".*\}',   # Full JSON object with citations
                     r'\{[^}]*"answer"[^}]*"suggestions"[^}]*\}',  # More specific pattern
                 ]
                 
@@ -195,12 +198,19 @@ Please proceed with the most efficient approach for the user's request.
                     if "answer" in parsed_response:
                         answer_text = parsed_response["answer"]
                         suggestions = parsed_response.get("suggestions", [])
+                        citations = parsed_response.get("citations", [])
+                        most_referenced_page = parsed_response.get("most_referenced_page")
                         
                         # Ensure suggestions is always a list
                         if not isinstance(suggestions, list):
                             suggestions = []
+                        
+                        # Ensure citations is always a list
+                        if not isinstance(citations, list):
+                            citations = []
                             
-                        print(f"DEBUG: Extracted {len(suggestions)} suggestions from JSON response")
+                        print(f"DEBUG: Extracted {len(suggestions)} suggestions and {len(citations)} citations from JSON response")
+                        print(f"DEBUG: Most referenced page: {most_referenced_page}")
                     else:
                         print("DEBUG: JSON found but no 'answer' key")
                 else:
@@ -231,15 +241,20 @@ Please proceed with the most efficient approach for the user's request.
                 # If parsing fails, treat the entire response as the answer
                 pass
             
-            # For RAG/information requests, return JSON response with suggestions
+            # For RAG/information requests, return JSON response with suggestions and citations
             response_content = {
                 "response": answer_text,
                 "session_id": session_id,
                 "doc_id": doc_id,
                 "page": page_number,
                 "type": "information",
-                "suggestions": suggestions  # Always include suggestions array (empty if none)
+                "suggestions": suggestions,  # Always include suggestions array (empty if none)
+                "citations": citations,      # Include citations array (empty if none)
             }
+            
+            # Add most_referenced_page if available
+            if most_referenced_page is not None:
+                response_content["most_referenced_page"] = most_referenced_page
             
             return JSONResponse(content=response_content)
             
@@ -456,13 +471,16 @@ Please proceed based on the user's intent.
             
             # Try to parse the response for suggestions (same logic as unified endpoint)
             suggestions = []
+            citations = []
+            most_referenced_page = None
             answer_text = final_msg
             
             # Check if the response contains JSON from answer_question_with_suggestions
             try:
                 # Look for JSON pattern in the response - try multiple patterns
                 json_patterns = [
-                    r'\{.*"answer".*"suggestions".*\}',  # Full JSON object
+                    r'\{.*"answer".*"suggestions".*\}',  # Full JSON object with suggestions
+                    r'\{.*"answer".*"citations".*\}',   # Full JSON object with citations
                     r'\{[^}]*"answer"[^}]*"suggestions"[^}]*\}',  # More specific pattern
                 ]
                 
@@ -483,12 +501,19 @@ Please proceed based on the user's intent.
                     if "answer" in parsed_response:
                         answer_text = parsed_response["answer"]
                         suggestions = parsed_response.get("suggestions", [])
+                        citations = parsed_response.get("citations", [])
+                        most_referenced_page = parsed_response.get("most_referenced_page")
                         
                         # Ensure suggestions is always a list
                         if not isinstance(suggestions, list):
                             suggestions = []
+                        
+                        # Ensure citations is always a list
+                        if not isinstance(citations, list):
+                            citations = []
                             
-                        print(f"DEBUG: Extracted {len(suggestions)} suggestions from JSON response")
+                        print(f"DEBUG: Extracted {len(suggestions)} suggestions and {len(citations)} citations from JSON response")
+                        print(f"DEBUG: Most referenced page: {most_referenced_page}")
                     else:
                         print("DEBUG: JSON found but no 'answer' key")
                 else:
@@ -519,7 +544,7 @@ Please proceed based on the user's intent.
                 # If parsing fails, treat the entire response as the answer
                 pass
             
-            # For RAG/information requests, return JSON response with suggestions and project context
+            # For RAG/information requests, return JSON response with suggestions, citations and project context
             response_content = {
                 "response": answer_text,
                 "session_id": session_id,
@@ -528,11 +553,16 @@ Please proceed based on the user's intent.
                 "page": page_number,
                 "type": "information",
                 "suggestions": suggestions,  # Always include suggestions array (empty if none)
+                "citations": citations,      # Include citations array (empty if none)
                 "project_context": {
                     "name": project["name"],
                     "description": project["description"]
                 }
             }
+            
+            # Add most_referenced_page if available
+            if most_referenced_page is not None:
+                response_content["most_referenced_page"] = most_referenced_page
             
             return JSONResponse(content=response_content)
             
