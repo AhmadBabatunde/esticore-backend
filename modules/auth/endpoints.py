@@ -4,6 +4,7 @@ Authentication API endpoints for the Floor Plan Agent API
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from modules.auth.service import auth_service
+from modules.auth.email_service import email_service
 from modules.config.settings import settings
 import json
 
@@ -73,6 +74,37 @@ async def google_signin_userinfo(
     """
     return auth_service.google_signin_userinfo(email, google_id)
 
+@router.post("/continue-with-google")
+async def continue_with_google(id_token: str = Form(...)):
+    """
+    Continue with Google endpoint that handles both signup and signin
+    Automatically determines whether to sign up or sign in based on user existence
+    """
+    if not id_token:
+        raise HTTPException(status_code=400, detail="id_token is required")
+    
+    return auth_service.continue_with_google(id_token)
+
+@router.get("/verify")
+async def verify_email(token: str):
+    """
+    Verify email address using verification token
+    """
+    if not token:
+        raise HTTPException(status_code=400, detail="Verification token is required")
+    
+    return auth_service.verify_email(token)
+
+@router.post("/resend-verification")
+async def resend_verification(email: str = Form(...)):
+    """
+    Resend verification email to user
+    """
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+    
+    return auth_service.resend_verification_email(email)
+
 @router.get("/google-oauth-test", response_class=HTMLResponse)
 async def google_oauth_test():
     """
@@ -109,6 +141,13 @@ async def google_oauth_test():
         <input type="submit" value="Test Google Signup">
     </form>
     
+    <h2>Continue with Google Test:</h2>
+    <form id="continue-form" action="/auth/continue-with-google" method="post">
+        <label for="continue_id_token">ID Token:</label><br>
+        <textarea id="continue_id_token" name="id_token" rows="10" cols="80" placeholder="Paste Google ID token here..."></textarea><br><br>
+        <input type="submit" value="Test Continue with Google">
+    </form>
+    
     <h2>Instructions:</h2>
     <ol>
         <li>Make sure your Google Client ID is configured in .env</li>
@@ -122,10 +161,11 @@ async def google_oauth_test():
     function handleCredentialResponse(response) {{
         console.log("Encoded JWT ID token: " + response.credential);
         document.getElementById('id_token').value = response.credential;
-        alert('ID token received! Check the textarea below or console.');
+        document.getElementById('continue_id_token').value = response.credential;
+        alert('ID token received! Check the textareas below or console.');
     }}
     
-    // Handle form submission
+    // Handle signup form submission
     document.getElementById('manual-form').addEventListener('submit', function(e) {{
         e.preventDefault();
         const token = document.getElementById('id_token').value;
@@ -144,8 +184,36 @@ async def google_oauth_test():
         }})
         .then(response => response.json())
         .then(data => {{
-            alert('Response: ' + JSON.stringify(data, null, 2));
-            console.log('Response:', data);
+            alert('Signup Response: ' + JSON.stringify(data, null, 2));
+            console.log('Signup Response:', data);
+        }})
+        .catch(error => {{
+            alert('Error: ' + error);
+            console.error('Error:', error);
+        }});
+    }});
+    
+    // Handle continue with Google form submission
+    document.getElementById('continue-form').addEventListener('submit', function(e) {{
+        e.preventDefault();
+        const token = document.getElementById('continue_id_token').value;
+        if (!token) {{
+            alert('Please enter an ID token');
+            return;
+        }}
+        
+        // Submit via fetch to see the response
+        fetch('/auth/continue-with-google', {{
+            method: 'POST',
+            headers: {{
+                'Content-Type': 'application/x-www-form-urlencoded',
+            }},
+            body: 'id_token=' + encodeURIComponent(token)
+        }})
+        .then(response => response.json())
+        .then(data => {{
+            alert('Continue with Google Response: ' + JSON.stringify(data, null, 2));
+            console.log('Continue with Google Response:', data);
         }})
         .catch(error => {{
             alert('Error: ' + error);

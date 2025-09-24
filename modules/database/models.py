@@ -21,7 +21,20 @@ class User:
     email: str = ""
     password: str = ""
     google_id: Optional[str] = None
+    is_verified: bool = False
+    verification_token: Optional[str] = None
+    verification_token_expires: Optional[datetime] = None
     created_at: Optional[datetime] = None
+
+@dataclass
+class EmailVerificationToken:
+    """Email verification token data model"""
+    id: Optional[int] = None
+    user_id: int = 0
+    token: str = ""
+    expires_at: datetime = None
+    created_at: Optional[datetime] = None
+    used_at: Optional[datetime] = None
 
 @dataclass
 class Document:
@@ -173,6 +186,9 @@ class DatabaseManager:
                     email VARCHAR(255) UNIQUE NOT NULL,
                     password VARCHAR(255) NOT NULL,
                     google_id VARCHAR(255) UNIQUE,
+                    is_verified BOOLEAN DEFAULT FALSE,
+                    verification_token VARCHAR(255),
+                    verification_token_expires TIMESTAMP NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """)
@@ -260,6 +276,9 @@ class DatabaseManager:
                     email VARCHAR(255) UNIQUE NOT NULL,
                     password VARCHAR(255) NOT NULL,
                     google_id VARCHAR(255) UNIQUE,
+                    is_verified BOOLEAN DEFAULT 0,
+                    verification_token VARCHAR(255),
+                    verification_token_expires DATETIME,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -357,6 +376,7 @@ class DatabaseManager:
         
         # Run migration for existing databases
         self._migrate_documents_schema()
+        self._migrate_email_verification_schema()
     
     def _migrate_documents_schema(self):
         """Migrate documents table to include vector_path column if it doesn't exist"""
@@ -509,7 +529,7 @@ class DatabaseManager:
         
         try:
             cur.execute(
-                f"SELECT id, firstname, lastname, email, password, google_id, created_at FROM userdata WHERE email = {placeholder}",
+                f"SELECT id, firstname, lastname, email, password, google_id, is_verified, verification_token, verification_token_expires, created_at FROM userdata WHERE email = {placeholder}",
                 (email,)
             )
             row = cur.fetchone()
@@ -522,7 +542,10 @@ class DatabaseManager:
                     email=row[3],
                     password=row[4],
                     google_id=row[5],
-                    created_at=row[6]
+                    is_verified=bool(row[6]) if row[6] is not None else False,
+                    verification_token=row[7],
+                    verification_token_expires=row[8],
+                    created_at=row[9]
                 )
             return None
             
@@ -537,7 +560,7 @@ class DatabaseManager:
         
         try:
             cur.execute(
-                f"SELECT id, firstname, lastname, email, password, google_id, created_at FROM userdata WHERE google_id = {placeholder}",
+                f"SELECT id, firstname, lastname, email, password, google_id, is_verified, verification_token, verification_token_expires, created_at FROM userdata WHERE google_id = {placeholder}",
                 (google_id,)
             )
             row = cur.fetchone()
@@ -550,7 +573,10 @@ class DatabaseManager:
                     email=row[3],
                     password=row[4],
                     google_id=row[5],
-                    created_at=row[6]
+                    is_verified=bool(row[6]) if row[6] is not None else False,
+                    verification_token=row[7],
+                    verification_token_expires=row[8],
+                    created_at=row[9]
                 )
             return None
             
@@ -567,7 +593,7 @@ class DatabaseManager:
         
         try:
             cur.execute(
-                f"SELECT id, firstname, lastname, email, password, google_id, created_at FROM userdata WHERE email = {placeholder} AND password = {placeholder}",
+                f"SELECT id, firstname, lastname, email, password, google_id, is_verified, verification_token, verification_token_expires, created_at FROM userdata WHERE email = {placeholder} AND password = {placeholder}",
                 (email, hashed_password)
             )
             row = cur.fetchone()
@@ -580,7 +606,10 @@ class DatabaseManager:
                     email=row[3],
                     password=row[4],
                     google_id=row[5],
-                    created_at=row[6]
+                    is_verified=bool(row[6]) if row[6] is not None else False,
+                    verification_token=row[7],
+                    verification_token_expires=row[8],
+                    created_at=row[9]
                 )
             return None
             
@@ -1178,6 +1207,149 @@ class DatabaseManager:
             
             return result
             
+        finally:
+            conn.close()
+    
+    def _migrate_email_verification_schema(self):
+        """Add email verification columns to existing userdata table"""
+        conn = None
+        try:
+            conn = self.get_connection()
+            cur = conn.cursor()
+            
+            if self.use_rds:
+                # Check if email verification columns exist in MySQL
+                cur.execute("""
+                    SELECT COUNT(*) 
+                    FROM INFORMATION_SCHEMA.COLUMNS 
+                    WHERE TABLE_SCHEMA = %s 
+                    AND TABLE_NAME = 'userdata' 
+                    AND COLUMN_NAME = 'is_verified'
+                """, (settings.DB_NAME,))
+                
+                column_exists = cur.fetchone()[0] > 0
+                
+                if not column_exists:
+                    print("Adding email verification columns to userdata table (MySQL)...")
+                    cur.execute("ALTER TABLE userdata ADD COLUMN is_verified BOOLEAN DEFAULT FALSE")
+                    cur.execute("ALTER TABLE userdata ADD COLUMN verification_token VARCHAR(255)")
+                    cur.execute("ALTER TABLE userdata ADD COLUMN verification_token_expires TIMESTAMP NULL")
+                    
+                    # Set Google OAuth users as verified by default
+                    cur.execute("UPDATE userdata SET is_verified = TRUE WHERE google_id IS NOT NULL")
+                    
+                    conn.commit()
+                    print("Email verification columns added successfully")
+                else:
+                    print("Email verification columns already exist in userdata table")
+            else:
+                # Check if email verification columns exist in SQLite
+                cur.execute("PRAGMA table_info(userdata)")
+                columns = [row[1] for row in cur.fetchall()]
+                
+                if 'is_verified' not in columns:
+                    print("Adding email verification columns to userdata table (SQLite)...")
+                    cur.execute("ALTER TABLE userdata ADD COLUMN is_verified BOOLEAN DEFAULT 0")
+                    cur.execute("ALTER TABLE userdata ADD COLUMN verification_token VARCHAR(255)")
+                    cur.execute("ALTER TABLE userdata ADD COLUMN verification_token_expires DATETIME")
+                    
+                    # Set Google OAuth users as verified by default
+                    cur.execute("UPDATE userdata SET is_verified = 1 WHERE google_id IS NOT NULL")
+                    
+                    conn.commit()
+                    print("Email verification columns added successfully")
+                else:
+                    print("Email verification columns already exist in userdata table")
+                    
+        except Exception as e:
+            print(f"Email verification migration error: {e}")
+            if conn:
+                conn.rollback()
+            # Don't raise the exception to prevent breaking initialization
+        finally:
+            if conn:
+                conn.close()
+    
+    # Email verification methods
+    def create_verification_token(self, user_id: int, token: str, expires_at: datetime) -> bool:
+        """Create or update verification token for user"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"UPDATE userdata SET verification_token = {placeholder}, verification_token_expires = {placeholder} WHERE id = {placeholder}",
+                (token, expires_at, user_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+    
+    def get_user_by_verification_token(self, token: str) -> Optional[User]:
+        """Get user by verification token"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"SELECT id, firstname, lastname, email, password, google_id, is_verified, verification_token, verification_token_expires, created_at FROM userdata WHERE verification_token = {placeholder}",
+                (token,)
+            )
+            row = cur.fetchone()
+            
+            if row:
+                return User(
+                    id=row[0],
+                    firstname=row[1],
+                    lastname=row[2],
+                    email=row[3],
+                    password=row[4],
+                    google_id=row[5],
+                    is_verified=bool(row[6]),
+                    verification_token=row[7],
+                    verification_token_expires=row[8],
+                    created_at=row[9]
+                )
+            return None
+            
+        finally:
+            conn.close()
+    
+    def verify_user_email(self, user_id: int) -> bool:
+        """Mark user email as verified and clear verification token"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"UPDATE userdata SET is_verified = {1 if not self.use_rds else 'TRUE'}, verification_token = NULL, verification_token_expires = NULL WHERE id = {placeholder}",
+                (user_id,)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+    
+    def clear_expired_verification_tokens(self):
+        """Clear expired verification tokens"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        
+        try:
+            if self.use_rds:
+                cur.execute(
+                    "UPDATE userdata SET verification_token = NULL, verification_token_expires = NULL WHERE verification_token_expires < NOW()"
+                )
+            else:
+                cur.execute(
+                    "UPDATE userdata SET verification_token = NULL, verification_token_expires = NULL WHERE verification_token_expires < datetime('now')"
+                )
+            conn.commit()
+            return cur.rowcount
         finally:
             conn.close()
 

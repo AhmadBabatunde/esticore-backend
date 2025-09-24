@@ -22,6 +22,17 @@ class Settings:
     # Google OAuth Configuration
     GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
     
+    # Email Configuration for verification
+    SMTP_SERVER = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
+    SMTP_PORT = int(os.getenv('SMTP_PORT', 587))
+    SMTP_USERNAME = os.getenv('SMTP_USERNAME')
+    SMTP_PASSWORD = os.getenv('SMTP_PASSWORD')
+    FROM_EMAIL = os.getenv('FROM_EMAIL', 'noreply@esticore.com')
+    
+    # Email verification settings
+    VERIFICATION_TOKEN_EXPIRE_HOURS = int(os.getenv('VERIFICATION_TOKEN_EXPIRE_HOURS', 1))
+    FRONTEND_URL = os.getenv('FRONTEND_URL')
+    
     # LangSmith Configuration
     LANGSMITH_TRACING = os.getenv('LANGSMITH_TRACING', 'false').lower() == 'true'
     LANGSMITH_ENDPOINT = os.getenv('LANGSMITH_ENDPOINT')
