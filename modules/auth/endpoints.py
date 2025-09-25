@@ -88,12 +88,24 @@ async def continue_with_google(id_token: str = Form(...)):
 @router.get("/verify")
 async def verify_email(token: str):
     """
-    Verify email address using verification token
+    Verify email address using verification token (legacy link support)
     """
     if not token:
         raise HTTPException(status_code=400, detail="Verification token is required")
     
     return auth_service.verify_email(token)
+
+@router.post("/verify-otp")
+async def verify_otp(email: str = Form(...), otp: str = Form(...)):
+    """
+    Verify email address using OTP code
+    """
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+    if not otp:
+        raise HTTPException(status_code=400, detail="OTP code is required")
+    
+    return auth_service.verify_email_otp(email, otp)
 
 @router.post("/resend-verification")
 async def resend_verification(email: str = Form(...)):

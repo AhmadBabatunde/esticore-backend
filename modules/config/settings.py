@@ -31,7 +31,8 @@ class Settings:
     
     # Email verification settings
     VERIFICATION_TOKEN_EXPIRE_HOURS = int(os.getenv('VERIFICATION_TOKEN_EXPIRE_HOURS', 1))
-    FRONTEND_URL = os.getenv('FRONTEND_URL')
+    OTP_EXPIRE_MINUTES = int(os.getenv('OTP_EXPIRE_MINUTES', 5))
+    FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
     
     # LangSmith Configuration
     LANGSMITH_TRACING = os.getenv('LANGSMITH_TRACING', 'false').lower() == 'true'

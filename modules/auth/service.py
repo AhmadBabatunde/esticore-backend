@@ -356,10 +356,51 @@ class AuthService:
             
         except HTTPException:
             raise
+    def verify_email_otp(self, email: str, otp: str) -> Dict[str, Any]:
+        """Verify user email using OTP code"""
+        try:
+            # Find user by email
+            user = self.db.get_user_by_email(email)
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            # Check if OTP matches
+            if not user.verification_token or user.verification_token != otp:
+                raise HTTPException(status_code=400, detail="Invalid verification code")
+            
+            # Check if OTP is expired
+            if user.verification_token_expires and user.verification_token_expires < datetime.now():
+                raise HTTPException(status_code=400, detail="Verification code has expired. Please request a new one.")
+            
+            # Check if already verified
+            if user.is_verified:
+                return {
+                    "message": "Email already verified",
+                    "user_id": user.id,
+                    "email": user.email,
+                    "already_verified": True
+                }
+            
+            # Mark user as verified
+            self.db.verify_user_email(user.id)
+            
+            # Send welcome email
+            from modules.auth.email_service import email_service
+            email_service.send_verification_success_email(user.email, user.firstname)
+            
+            return {
+                "message": "Email verified successfully! You can now log in.",
+                "user_id": user.id,
+                "email": user.email,
+                "verified": True
+            }
+            
+        except HTTPException:
+            raise
         except Exception as e:
-            print(f"DEBUG: Error in resend_verification_email: {str(e)}")
-            raise HTTPException(status_code=500, detail="Failed to resend verification email")
-
+            print(f"DEBUG: Error in verify_email_otp: {str(e)}")
+            raise HTTPException(status_code=500, detail="Email verification error")
+    
     def continue_with_google(self, id_token_str: str) -> Dict[str, Any]:
         """Google OAuth continue process - handles both signup and signin automatically"""
         print(f"DEBUG: Continue with Google called with token: {id_token_str[:50]}...")

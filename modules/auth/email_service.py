@@ -3,6 +3,7 @@ Email service for sending verification and notification emails
 """
 import smtplib
 import uuid
+import random
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -26,8 +27,8 @@ class EmailService:
         return bool(self.smtp_server and self.smtp_username and self.smtp_password)
     
     def generate_verification_token(self) -> str:
-        """Generate a unique verification token"""
-        return str(uuid.uuid4())
+        """Generate a 6-digit OTP code"""
+        return str(random.randint(100000, 999999))
     
     def send_verification_email(self, user_id: int, email: str, firstname: str) -> bool:
         """Send email verification email to user"""
@@ -36,18 +37,15 @@ class EmailService:
             return False
         
         try:
-            # Generate verification token
-            token = self.generate_verification_token()
-            expires_at = datetime.now() + timedelta(hours=settings.VERIFICATION_TOKEN_EXPIRE_HOURS)
+            # Generate 6-digit OTP code
+            otp_code = self.generate_verification_token()
+            expires_at = datetime.now() + timedelta(minutes=5)  # 5 minutes expiry
             
-            # Store token in database
-            db_manager.create_verification_token(user_id, token, expires_at)
-            
-            # Create verification URL
-            verification_url = f"{self.frontend_url}/verify?token={token}"
+            # Store OTP in database
+            db_manager.create_verification_token(user_id, otp_code, expires_at)
             
             # Create email content
-            subject = "Verify your email address - Esticore"
+            subject = "Your Verification Code - Esticore"
             
             # HTML email template
             html_body = f"""
@@ -62,34 +60,37 @@ class EmailService:
         .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
         .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 10px 10px 0 0; text-align: center; }}
         .content {{ background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }}
-        .button {{ display: inline-block; padding: 12px 30px; background: #667eea; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0; }}
+        .otp-code {{ background: #667eea; color: white; font-size: 32px; font-weight: bold; padding: 20px; border-radius: 10px; text-align: center; margin: 20px 0; letter-spacing: 8px; font-family: monospace; }}
         .footer {{ text-align: center; margin-top: 30px; font-size: 12px; color: #666; }}
-        .token {{ background: #f0f0f0; padding: 10px; border-radius: 5px; font-family: monospace; margin: 10px 0; word-break: break-all; }}
+        .warning {{ background: #fff3cd; border: 1px solid #ffeaa7; color: #856404; padding: 15px; border-radius: 5px; margin: 20px 0; }}
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>Welcome to Esticore!</h1>
-            <p>Please verify your email address</p>
+            <h1>Verify Your Email</h1>
+            <p>Enter the code below to complete verification</p>
         </div>
         <div class="content">
             <h2>Hi {firstname}!</h2>
-            <p>Thank you for signing up for Esticore. To complete your registration and start using our AI-powered floor plan analysis platform, please verify your email address.</p>
+            <p>Thank you for signing up for Esticore. Please use the verification code below to complete your registration:</p>
             
-            <p><strong>Click the button below to verify your email:</strong></p>
-            <p style="text-align: center;">
-                <a href="{verification_url}" class="button">Verify Email Address</a>
-            </p>
+            <div class="otp-code">{otp_code}</div>
             
-            <p>Or copy and paste this link into your browser:</p>
-            <div class="token">{verification_url}</div>
+            <div class="warning">
+                <strong>⚠️ Important:</strong> This verification code will expire in <strong>5 minutes</strong>.
+            </div>
             
-            <p><strong>Important:</strong> This verification link will expire in {settings.VERIFICATION_TOKEN_EXPIRE_HOURS} hours.</p>
+            <p><strong>How to verify:</strong></p>
+            <ol>
+                <li>Return to the Esticore application</li>
+                <li>Enter the 6-digit code above</li>
+                <li>Complete your account verification</li>
+            </ol>
             
             <hr style="margin: 30px 0; border: none; border-top: 1px solid #ddd;">
             
-            <p><strong>What's next?</strong></p>
+            <p><strong>What's next after verification?</strong></p>
             <ul>
                 <li>Upload your floor plan documents</li>
                 <li>Use AI-powered analysis and annotation tools</li>
@@ -101,7 +102,7 @@ class EmailService:
         </div>
         <div class="footer">
             <p>This email was sent by Esticore. If you have questions, please contact our support team.</p>
-            <p>Token: {token[:8]}...</p>
+            <p>Code expires at: {expires_at.strftime('%Y-%m-%d %H:%M:%S')}</p>
         </div>
     </div>
 </body>
@@ -112,12 +113,16 @@ class EmailService:
             text_body = f"""
 Hi {firstname}!
 
-Welcome to Esticore! Please verify your email address to complete your registration.
+Welcome to Esticore! Please use the verification code below to complete your registration:
 
-Verification Link:
-{verification_url}
+Verification Code: {otp_code}
 
-This link will expire in {settings.VERIFICATION_TOKEN_EXPIRE_HOURS} hours.
+IMPORTANT: This code will expire in 5 minutes.
+
+How to verify:
+1. Return to the Esticore application
+2. Enter the 6-digit code above
+3. Complete your account verification
 
 What's next after verification:
 - Upload your floor plan documents
@@ -129,7 +134,7 @@ If you didn't create this account, you can safely ignore this email.
 
 ---
 Esticore Team
-Token: {token[:8]}...
+Code expires at: {expires_at.strftime('%Y-%m-%d %H:%M:%S')}
             """
             
             # Send email
