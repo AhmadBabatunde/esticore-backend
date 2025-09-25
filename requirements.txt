@@ -15,6 +15,7 @@ langmem
 langchain-openai
 langchain-community
 langgraph
+langchain-tavily
 
 # PDF and image processing
 PyPDF2
