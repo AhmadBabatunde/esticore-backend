@@ -304,6 +304,8 @@ class AuthService:
                 return {
                     "message": "Email already verified",
                     "user_id": user.id,
+                    "firstname": user.firstname,
+                    "lastname": user.lastname,
                     "email": user.email,
                     "already_verified": True
                 }
@@ -377,6 +379,8 @@ class AuthService:
                 return {
                     "message": "Email already verified",
                     "user_id": user.id,
+                    "firstname": user.firstname,
+                    "lastname": user.lastname,
                     "email": user.email,
                     "already_verified": True
                 }
@@ -391,6 +395,8 @@ class AuthService:
             return {
                 "message": "Email verified successfully! You can now log in.",
                 "user_id": user.id,
+                "firstname": user.firstname,
+                "lastname": user.lastname,
                 "email": user.email,
                 "verified": True
             }
