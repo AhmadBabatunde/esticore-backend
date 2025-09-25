@@ -13,6 +13,7 @@ from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 from inference_sdk import InferenceHTTPClient
+from langchain_tavily import TavilySearch
 
 from modules.config.settings import settings
 from modules.pdf_processing.service import pdf_processor
@@ -992,12 +993,41 @@ def save_annotated_image_as_pdf_page(image_path: str, original_pdf_path: str, pa
     except Exception as e:
         return f"Error saving annotated PDF: {str(e)}"
 
+@tool
+def internet_search(query: str) -> str:
+    """Search the internet for up-to-date information when needed to answer user queries or when
+    user questions require more detailed information beyond the available context"""
+    try:
+        # Initialize Tavily search tool with configuration from settings
+        tavily_search = TavilySearch(
+            max_results=5,
+            topic="general",
+            include_answer=True,
+            include_raw_content=False,
+            include_images=False
+        )
+        
+        # Execute the search
+        result = tavily_search.invoke({"query": query})
+        
+        # Format and return the results
+        formatted_result = {
+            "query": query,
+            "results": result.get("results", []),
+            "answer": result.get("answer", "")
+        }
+        
+        return json.dumps(formatted_result)
+    except Exception as e:
+        return json.dumps({"error": f"Internet search failed: {str(e)}"})
+
 # List of all available tools
 ALL_TOOLS = [
     load_pdf_for_floorplan,
     convert_pdf_page_to_image,
     detect_floor_plan_objects,
     verify_detections,
+    internet_search,
     apply_highlight_annotation,
     apply_circle_annotation,
     apply_rectangle_annotation,

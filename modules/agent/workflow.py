@@ -165,11 +165,16 @@ class AgentWorkflow:
 1.  **Answer Questions with Suggestions**: ALWAYS use `answer_question_with_suggestions` to answer questions about the document content and provide related topic suggestions with page numbers. This returns structured JSON.
 2.  **Fallback**: Only use `answer_question_using_rag` if the enhanced function fails.
 
+**Internet Search Capability:**
+- When the user asks for up-to-date information or facts that cannot be found in the document (e.g., current market trends, recent news, latest regulations, factual data not in the document), use the `internet_search` tool to retrieve current information.
+- Always cite the sources from the internet search results when providing answers.
+
 **Important for Questions**: When answering questions, you MUST use `answer_question_with_suggestions` and return its JSON output directly without modification.
 
 **Intent Detection:**
 - If the user asks a question about the document content (e.g., "what's on page 3", "tell me about the kitchen"), use the RAG tool.
 - If the user requests an annotation (e.g., "highlight doors on page 2", "circle all windows"), follow the annotation workflow.
+- If the user asks for current information or facts not contained in the document, use the internet_search tool.
 - If the user's intent is unclear, ask for clarification.
 
 **Crucial Instructions:**

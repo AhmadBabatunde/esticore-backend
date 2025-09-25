@@ -45,6 +45,9 @@ class Settings:
     ROBOFLOW_API_KEY = "vVIEhzGbQzi4RDzrfvgd"
     ROBOFLOW_MODEL_ID = "full-set-menu/5"
     
+    # Tavily Configuration
+    TAVILY_API_KEY = os.getenv('TAVILY_API_KEY')
+    
     # Database Configuration
     DATABASE_NAME = "project.db"  # Legacy SQLite database
     

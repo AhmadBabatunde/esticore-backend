@@ -150,19 +150,18 @@ Please proceed with the most efficient approach for the user's request.
             # Add cleanup task
             background_tasks.add_task(delete_file_after_delay, output_pdf_path, settings.CHAT_FILE_DELETE_DELAY)
             
-            # Return the PDF file directly as download with text response in headers
-            return FileResponse(
-                path=output_pdf_path,
-                filename=output_filename,
-                media_type="application/pdf",
-                headers={
-                    "Content-Disposition": f"attachment; filename={output_filename}",
-                    "X-Agent-Response": final_msg.replace('\n', ' ').replace('\r', '')[:500],  # Truncate to avoid header size limits
-                    "X-Session-ID": session_id,
-                    "X-Doc-ID": doc_id,
-                    "X-Page-Number": str(page_number)
-                }
-            )
+            # Return JSON response with annotation details and tracking ID
+            return JSONResponse(content={
+                "response": final_msg,
+                "session_id": session_id,
+                "doc_id": doc_id,
+                "page": page_number,
+                "type": "annotation",
+                "annotation_status": "completed",
+                "annotated_file_id": output_filename,
+                "annotated_file_path": output_pdf_path,
+                "message": "Annotation completed successfully"
+            })
         else:
             print(f"DEBUG: No annotation file created. Returning information response.")
             
@@ -457,15 +456,19 @@ Please proceed based on the user's intent.
             # Add cleanup task
             background_tasks.add_task(delete_file_after_delay, output_pdf_path, settings.CHAT_FILE_DELETE_DELAY)
             
-            # Return the PDF file directly as download
-            return FileResponse(
-                path=output_pdf_path,
-                filename=output_filename,
-                media_type="application/pdf",
-                headers={
-                    "Content-Disposition": f"attachment; filename={output_filename}"
-                }
-            )
+            # Return JSON response with annotation details and tracking ID
+            return JSONResponse(content={
+                "response": final_msg,
+                "session_id": session_id,
+                "project_id": project_id,
+                "doc_id": final_doc_id,
+                "page": page_number,
+                "type": "annotation",
+                "annotation_status": "completed",
+                "annotated_file_id": output_filename,
+                "annotated_file_path": output_pdf_path,
+                "message": "Annotation completed successfully"
+            })
         else:
             print(f"DEBUG: No annotation file created. Returning information response.")
             
