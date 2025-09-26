@@ -140,7 +140,7 @@ class AgentWorkflow:
         self.chat_sessions = ChatSession()
         
         # Initialize agent
-        self.llm = ChatOpenAI(model="gpt-4o", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+        self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
         self.agent = create_tool_calling_agent(self.llm, ALL_TOOLS, self._create_prompt())
         self.agent_executor = AgentExecutor(agent=self.agent, tools=ALL_TOOLS, verbose=True)
         

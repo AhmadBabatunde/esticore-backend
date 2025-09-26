@@ -16,6 +16,7 @@ langchain-openai
 langchain-community
 langgraph
 langchain-tavily
+tiktoken
 
 # PDF and image processing
 PyPDF2
