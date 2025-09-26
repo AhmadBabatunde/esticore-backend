@@ -6,6 +6,7 @@ from typing import Optional, List
 from modules.projects.service import project_service
 from modules.agent.workflow import agent_workflow
 from modules.database import db_manager
+from modules.session import session_manager
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -25,7 +26,7 @@ async def create_project(
         print(f"Debug: files is None: {files is None}")
         print(f"Debug: files length: {len(files) if files else 0}")
         
-        # Create a new session for this project
+        # Create a new session for this project (will be upgraded to context-aware session when first used)
         session_id = agent_workflow.get_or_create_chat_session()
         
         if files and len(files) > 0 and files[0].filename != '':
@@ -82,7 +83,7 @@ async def create_project_single_file(
         if file:
             print(f"Debug: filename: {file.filename}")
         
-        # Create a new session for this project
+        # Create a new session for this project (will be upgraded to context-aware session when first used)
         session_id = agent_workflow.get_or_create_chat_session()
         
         if file and file.filename and file.filename != '':

@@ -13,6 +13,7 @@ from modules.auth import auth_router
 from modules.pdf_processing import pdf_router
 from modules.projects import project_router
 from modules.api import agent_router, general_router
+from modules.api.session_endpoints import router as session_router
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application"""
@@ -42,6 +43,7 @@ def create_app() -> FastAPI:
     app.include_router(pdf_router)      # Document processing endpoints
     app.include_router(project_router)  # Project management endpoints
     app.include_router(agent_router)    # Agent workflow endpoints
+    app.include_router(session_router)  # Session management endpoints
     
     return app
 

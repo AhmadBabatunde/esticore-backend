@@ -17,6 +17,8 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 from modules.config.settings import settings
 from modules.agent.tools import ALL_TOOLS
+from modules.session import session_manager, context_resolver
+from modules.database.models import db_manager
 
 # ==============================
 # Memory Management
@@ -57,67 +59,15 @@ class SimpleMemory:
         self.chat_memory.clear()
 
 # ==============================
-# Chat Session Storage
+# Enhanced Session Management
 # ==============================
 
 @dataclass
 class ChatMessage:
-    """Chat message data structure"""
+    """Chat message data structure (kept for backward compatibility)"""
     role: str
     content: str
     timestamp: datetime = field(default_factory=datetime.now)
-
-class ChatSession:
-    """Simple chat session storage"""
-    def __init__(self):
-        self.sessions = {}
-    
-    def create_session(self, session_id=None):
-        if session_id is None:
-            session_id = str(uuid.uuid4())
-        self.sessions[session_id] = {
-            "messages": [],
-            "created_at": datetime.now(),
-            "last_activity": datetime.now()
-        }
-        return session_id
-    
-    def add_message(self, session_id, role, content):
-        if session_id not in self.sessions:
-            self.create_session(session_id)
-        
-        message = {
-            "role": role,
-            "content": content,
-            "timestamp": datetime.now()
-        }
-        
-        self.sessions[session_id]["messages"].append(message)
-        self.sessions[session_id]["last_activity"] = datetime.now()
-        
-        # Keep only the last N messages to prevent memory issues
-        if len(self.sessions[session_id]["messages"]) > settings.CHAT_HISTORY_LIMIT:
-            self.sessions[session_id]["messages"] = self.sessions[session_id]["messages"][-settings.CHAT_HISTORY_LIMIT:]
-    
-    def get_messages(self, session_id):
-        if session_id in self.sessions:
-            return self.sessions[session_id]["messages"]
-        return []
-    
-    def cleanup_old_sessions(self, hours=None):
-        """Remove sessions older than specified hours"""
-        if hours is None:
-            hours = settings.SESSION_CLEANUP_HOURS
-            
-        now = datetime.now()
-        expired_sessions = []
-        
-        for session_id, session_data in self.sessions.items():
-            if (now - session_data["last_activity"]).total_seconds() > hours * 3600:
-                expired_sessions.append(session_id)
-        
-        for session_id in expired_sessions:
-            del self.sessions[session_id]
 
 # ==============================
 # Agent State and Workflow
@@ -133,11 +83,13 @@ class FloorPlanState(MessagesState):
     page_number: int = 1
 
 class AgentWorkflow:
-    """Agent workflow management"""
+    """Enhanced agent workflow management with context-aware sessions"""
     
     def __init__(self):
         self.memory = SimpleMemory()
-        self.chat_sessions = ChatSession()
+        # Use new session manager instead of in-memory sessions
+        self.session_manager = session_manager
+        self.context_resolver = context_resolver
         
         # Initialize agent
         self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
@@ -258,25 +210,71 @@ You have access to:
         except Exception as e:
             raise Exception(f"Agent workflow error: {str(e)}")
     
-    def get_or_create_chat_session(self, session_id: str = None) -> str:
-        """Get or create a chat session"""
-        if random.random() < 0.1:  # 10% chance on each request
-            self.chat_sessions.cleanup_old_sessions()
+    def get_or_create_chat_session(self, session_id: str = None, user_id: int = None, context_type: str = 'GENERAL', context_id: str = None) -> str:
+        """Get or create a chat session with context support"""
+        # Trigger cleanup occasionally
+        if random.random() < settings.SESSION_ACTIVITY_UPDATE_PROBABILITY:
+            self.session_manager.cleanup_expired_sessions()
         
-        if not session_id:
-            session_id = self.chat_sessions.create_session()
-        elif session_id not in self.chat_sessions.sessions:
-            self.chat_sessions.create_session(session_id)
+        if session_id:
+            # Validate existing session
+            session = self.session_manager.get_session_by_id(session_id)
+            if session and session.is_active:
+                # Update activity and return existing session
+                self.session_manager.update_session_activity(session_id)
+                return session_id
         
-        return session_id
+        # Create new session if user_id is provided
+        if user_id is not None:
+            return self.session_manager.get_or_create_session(user_id, context_type, context_id)
+        
+        # Fallback: create a simple UUID for backward compatibility
+        return str(uuid.uuid4())
     
-    def add_chat_message(self, session_id: str, role: str, content: str):
-        """Add a message to chat session"""
-        self.chat_sessions.add_message(session_id, role, content)
+    def get_or_create_context_session(self, user_id: int, context_data: Dict[str, Any]) -> str:
+        """Get or create a session based on context data"""
+        context_type, context_id = self.context_resolver.resolve_context(context_data)
+        return self.session_manager.get_or_create_session(user_id, context_type, context_id)
     
-    def get_chat_history(self, session_id: str) -> List[Dict]:
+    def add_chat_message(self, session_id: str, role: str, content: str, user_id: int = None):
+        """Add a message to chat session with enhanced context support"""
+        if user_id is not None:
+            # Use the new session manager to add message with context
+            success = self.session_manager.add_message_to_session(session_id, user_id, role, content)
+            if not success:
+                print(f"Warning: Failed to add message to session {session_id}")
+        else:
+            # Fallback to old memory system for backward compatibility
+            if hasattr(self, 'chat_sessions'):
+                self.chat_sessions.add_message(session_id, role, content)
+    
+    def get_chat_history(self, session_id: str, user_id: int = None, limit: int = 50) -> List[Dict]:
         """Get chat history for a session"""
-        return self.chat_sessions.get_messages(session_id)
+        if user_id is not None:
+            # Use database-backed history
+            messages = db_manager.get_chat_history(user_id, session_id, limit)
+            # Convert to the expected format
+            return [
+                {
+                    "role": msg.role,
+                    "content": msg.message,
+                    "timestamp": msg.timestamp
+                }
+                for msg in reversed(messages)  # Reverse to get chronological order
+            ]
+        else:
+            # Fallback to old memory system for backward compatibility
+            if hasattr(self, 'chat_sessions'):
+                return self.chat_sessions.get_messages(session_id)
+            return []
+    
+    def get_session_context(self, session_id: str) -> tuple:
+        """Get the context type and ID for a session"""
+        return self.session_manager.get_session_context(session_id)
+    
+    def validate_session_access(self, session_id: str, user_id: int) -> bool:
+        """Validate that a user has access to a session"""
+        return self.session_manager.validate_session_access(session_id, user_id)
 
 # Global agent workflow instance
 agent_workflow = AgentWorkflow()

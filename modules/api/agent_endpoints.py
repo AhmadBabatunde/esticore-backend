@@ -15,6 +15,7 @@ from modules.pdf_processing.service import pdf_processor
 from modules.database import db_manager
 from modules.agent import agent_workflow
 from modules.projects.service import project_service
+from modules.session import session_manager, context_resolver
 
 def extract_manual_suggestions(text: str) -> list:
     """Extract manually formatted suggestions from the response text."""
@@ -69,12 +70,28 @@ async def unified_agent(
     if page_match:
         page_number = int(page_match.group(1))
     
-    # Get or create session for continuity
-    session_id = agent_workflow.get_or_create_chat_session(session_id)
+    # Resolve context for session management
+    context_data = {'doc_id': doc_id}
+    context_type, context_id = context_resolver.resolve_context(context_data)
     
-    # Add user message to chat history
-    agent_workflow.add_chat_message(session_id, "user", user_instruction)
-    db_manager.add_chat_message(user_id, session_id, "user", user_instruction)
+    # Validate context access
+    context_resolver.validate_context_access_with_exception(user_id, context_type, context_id)
+    
+    # Get or create context-aware session
+    if session_id:
+        # Validate existing session access
+        if not session_manager.validate_session_access(session_id, user_id):
+            # Create new session if access validation fails
+            session_id = session_manager.get_or_create_session(user_id, context_type, context_id)
+        else:
+            # Update activity for existing session
+            session_manager.update_session_activity(session_id)
+    else:
+        # Create new session with context
+        session_id = session_manager.get_or_create_session(user_id, context_type, context_id)
+    
+    # Add user message to chat history with context
+    session_manager.add_message_to_session(session_id, user_id, "user", user_instruction)
     
     # Generate unique output path for potential annotations
     output_filename = f"{doc_id}_page_{page_number}_{uuid.uuid4().hex[:8]}_unified.pdf"
@@ -84,10 +101,10 @@ async def unified_agent(
     os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
     
     # Get recent chat context
-    chat_history = agent_workflow.get_chat_history(session_id)
+    chat_history = agent_workflow.get_chat_history(session_id, user_id, limit=10)
     recent_context = ""
-    if len(chat_history) > 2:  # If there's previous conversation (more than current message)
-        recent_messages = chat_history[-6:-1]  # Last few exchanges, excluding current
+    if len(chat_history) > 1:  # If there's previous conversation (more than current message)
+        recent_messages = chat_history[-6:]  # Last few exchanges
         recent_context = "\n\nRecent conversation context:\n"
         for msg in recent_messages:
             recent_context += f"{msg['role']}: {msg['content']}\n"
@@ -145,8 +162,7 @@ Please proceed with the most efficient approach for the user's request.
         final_msg = final_state["messages"][-1].content
         
         # Save assistant response to chat history
-        agent_workflow.add_chat_message(session_id, "assistant", final_msg)
-        db_manager.add_chat_message(user_id, session_id, "assistant", final_msg)
+        session_manager.add_message_to_session(session_id, user_id, "assistant", final_msg)
         
         # Check if annotation was performed (PDF file created)
         if os.path.exists(output_pdf_path):
@@ -267,8 +283,7 @@ Please proceed with the most efficient approach for the user's request.
         print(f"DEBUG: Exception occurred in unified agent: {str(e)}")
         
         # Save error to chat history
-        agent_workflow.add_chat_message(session_id, "assistant", error_msg)
-        db_manager.add_chat_message(user_id, session_id, "assistant", error_msg)
+        session_manager.add_message_to_session(session_id, user_id, "assistant", error_msg)
         
         return JSONResponse(
             content={
@@ -380,12 +395,28 @@ async def unified_agent_for_project(
     if page_match:
         page_number = int(page_match.group(1))
     
-    # Get or create session for continuity
-    session_id = agent_workflow.get_or_create_chat_session(session_id)
+    # Resolve context for session management (project context)
+    context_data = {'project_id': project_id, 'doc_id': final_doc_id}
+    context_type, context_id = context_resolver.resolve_context(context_data)
     
-    # Add user message to chat history
-    agent_workflow.add_chat_message(session_id, "user", user_instruction)
-    db_manager.add_chat_message(user_id, session_id, "user", user_instruction)
+    # Validate context access
+    context_resolver.validate_context_access_with_exception(user_id, context_type, context_id)
+    
+    # Get or create context-aware session
+    if session_id:
+        # Validate existing session access
+        if not session_manager.validate_session_access(session_id, user_id):
+            # Create new session if access validation fails
+            session_id = session_manager.get_or_create_session(user_id, context_type, context_id)
+        else:
+            # Update activity for existing session
+            session_manager.update_session_activity(session_id)
+    else:
+        # Create new session with context
+        session_id = session_manager.get_or_create_session(user_id, context_type, context_id)
+    
+    # Add user message to chat history with context
+    session_manager.add_message_to_session(session_id, user_id, "user", user_instruction)
     
     # Generate unique output path for potential annotations
     output_filename = f"{project_id}_{final_doc_id}_page_{page_number}_{uuid.uuid4().hex[:8]}_project.pdf"
@@ -395,10 +426,10 @@ async def unified_agent_for_project(
     os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
     
     # Get recent chat context
-    chat_history = agent_workflow.get_chat_history(session_id)
+    chat_history = agent_workflow.get_chat_history(session_id, user_id, limit=10)
     recent_context = ""
-    if len(chat_history) > 2:  # If there's previous conversation (more than current message)
-        recent_messages = chat_history[-6:-1]  # Last few exchanges, excluding current
+    if len(chat_history) > 1:  # If there's previous conversation (more than current message)
+        recent_messages = chat_history[-6:]  # Last few exchanges
         recent_context = "\n\nRecent conversation context:\n"
         for msg in recent_messages:
             recent_context += f"{msg['role']}: {msg['content']}\n"
@@ -454,8 +485,7 @@ Please proceed based on the user's intent.
         final_msg = final_state["messages"][-1].content
         
         # Save assistant response to chat history
-        agent_workflow.add_chat_message(session_id, "assistant", final_msg)
-        db_manager.add_chat_message(user_id, session_id, "assistant", final_msg)
+        session_manager.add_message_to_session(session_id, user_id, "assistant", final_msg)
         
         # Check if annotation was performed (PDF file created)
         if os.path.exists(output_pdf_path):
@@ -582,8 +612,7 @@ Please proceed based on the user's intent.
         print(f"DEBUG: Exception occurred in project agent: {str(e)}")
         
         # Save error to chat history
-        agent_workflow.add_chat_message(session_id, "assistant", error_msg)
-        db_manager.add_chat_message(user_id, session_id, "assistant", error_msg)
+        session_manager.add_message_to_session(session_id, user_id, "assistant", error_msg)
         
         return JSONResponse(
             content={

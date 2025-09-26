@@ -64,14 +64,29 @@ class Project:
     updated_at: Optional[datetime] = None
 
 @dataclass
+class ChatSession:
+    """Enhanced chat session data model with context support"""
+    id: Optional[int] = None
+    session_id: str = ""
+    user_id: int = 0
+    context_type: str = ""  # PROJECT, DOCUMENT, GENERAL
+    context_id: Optional[str] = None  # project_id, doc_id, or None for general
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+    last_activity: Optional[datetime] = None
+    metadata: Optional[Dict[str, Any]] = None  # Additional context data
+
+@dataclass
 class ChatMessage:
-    """Chat message data model"""
+    """Enhanced chat message data model with context support"""
     id: Optional[int] = None
     user_id: int = 0
     session_id: str = ""
     role: str = ""  # 'user' or 'assistant'
     message: str = ""
     timestamp: Optional[datetime] = None
+    context_type: Optional[str] = None  # PROJECT, DOCUMENT, GENERAL
+    context_id: Optional[str] = None  # project_id, doc_id, or None for general
 
 class DatabaseManager:
     """Database operations manager"""
@@ -202,7 +217,10 @@ class DatabaseManager:
                     role VARCHAR(50) NOT NULL,
                     message TEXT NOT NULL,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE
+                    context_type ENUM('PROJECT', 'DOCUMENT', 'GENERAL') NULL,
+                    context_id VARCHAR(255) NULL,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    INDEX idx_context (context_type, context_id)
                 ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """)
             
@@ -257,6 +275,26 @@ class DatabaseManager:
                 ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """)
             
+            # Create chat_sessions table for enhanced session management
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS chat_sessions(
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    session_id VARCHAR(255) UNIQUE NOT NULL,
+                    user_id INT NOT NULL,
+                    context_type ENUM('PROJECT', 'DOCUMENT', 'GENERAL') NOT NULL,
+                    context_id VARCHAR(255) NULL,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    metadata JSON NULL,
+                    FOREIGN KEY (user_id) REFERENCES userdata(id) ON DELETE CASCADE,
+                    INDEX idx_user_context (user_id, context_type, context_id),
+                    INDEX idx_session_id (session_id),
+                    INDEX idx_last_activity (last_activity),
+                    INDEX idx_active_sessions (user_id, is_active)
+                ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """)
+            
             # Create test user if not exists
             cur.execute("SELECT * FROM userdata WHERE email = %s", ("test@example.com",))
             if not cur.fetchone():
@@ -292,9 +330,14 @@ class DatabaseManager:
                     role TEXT NOT NULL,
                     message TEXT NOT NULL,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    context_type TEXT NULL CHECK (context_type IN ('PROJECT', 'DOCUMENT', 'GENERAL') OR context_type IS NULL),
+                    context_id TEXT NULL,
                     FOREIGN KEY (user_id) REFERENCES userdata (id)
                 )
             """)
+            
+            # Create indexes for chathistory table
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_chathistory_context ON chathistory (context_type, context_id)")
             
             # Create projects table (handle migration from doc_id to doc_ids)
             # First check if projects table exists and what columns it has
@@ -362,6 +405,28 @@ class DatabaseManager:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_project_documents_project_id ON project_documents (project_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_project_documents_doc_id ON project_documents (doc_id)")
             
+            # Create chat_sessions table for enhanced session management
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS chat_sessions(
+                    id INTEGER PRIMARY KEY,
+                    session_id TEXT UNIQUE NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    context_type TEXT NOT NULL CHECK (context_type IN ('PROJECT', 'DOCUMENT', 'GENERAL')),
+                    context_id TEXT NULL,
+                    is_active BOOLEAN DEFAULT 1,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    metadata TEXT NULL,
+                    FOREIGN KEY (user_id) REFERENCES userdata(id) ON DELETE CASCADE
+                )
+            """)
+            
+            # Create indexes for chat_sessions table
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_context ON chat_sessions (user_id, context_type, context_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_sessions_session_id ON chat_sessions (session_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_sessions_last_activity ON chat_sessions (last_activity)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_sessions_active ON chat_sessions (user_id, is_active)")
+            
             # Create test user if not exists
             cur.execute("SELECT * FROM userdata WHERE email = ?", ("test@example.com",))
             if not cur.fetchone():
@@ -377,6 +442,10 @@ class DatabaseManager:
         # Run migration for existing databases
         self._migrate_documents_schema()
         self._migrate_email_verification_schema()
+        self._migrate_session_schema()
+        
+        # Migrate existing session data (run after schema migration)
+        self.migrate_existing_sessions()
     
     def _migrate_documents_schema(self):
         """Migrate documents table to include vector_path column if it doesn't exist"""
@@ -628,18 +697,22 @@ class DatabaseManager:
         finally:
             conn.close()
     
-    def add_chat_message(self, user_id: int, session_id: str, role: str, message: str):
-        """Add a chat message to history"""
+    def add_chat_message(self, user_id: int, session_id: str, role: str, message: str, context_type: str = None, context_id: str = None):
+        """Add a chat message to history with optional context information"""
         conn = self.get_connection()
         cur = conn.cursor()
         placeholder = self._get_placeholder()
         
         try:
-            cur.execute(
-                f"INSERT INTO chathistory (user_id, session_id, role, message) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                (user_id, session_id, role, message)
-            )
+            cur.execute(f"""
+                INSERT INTO chathistory (user_id, session_id, role, message, context_type, context_id) 
+                VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
+            """, (user_id, session_id, role, message, context_type, context_id))
+            
             conn.commit()
+            
+            # Update session activity if session exists
+            self.update_session_activity(session_id)
         finally:
             conn.close()
     
@@ -653,7 +726,7 @@ class DatabaseManager:
             if session_id:
                 if self.use_rds:
                     cur.execute("""
-                        SELECT id, user_id, session_id, role, message, timestamp 
+                        SELECT id, user_id, session_id, role, message, timestamp, context_type, context_id
                         FROM chathistory 
                         WHERE user_id = %s AND session_id = %s
                         ORDER BY timestamp DESC
@@ -661,7 +734,7 @@ class DatabaseManager:
                     """, (user_id, session_id, limit))
                 else:
                     cur.execute("""
-                        SELECT id, user_id, session_id, role, message, timestamp 
+                        SELECT id, user_id, session_id, role, message, timestamp, context_type, context_id
                         FROM chathistory 
                         WHERE user_id = ? AND session_id = ?
                         ORDER BY timestamp DESC
@@ -670,7 +743,7 @@ class DatabaseManager:
             else:
                 if self.use_rds:
                     cur.execute("""
-                        SELECT id, user_id, session_id, role, message, timestamp 
+                        SELECT id, user_id, session_id, role, message, timestamp, context_type, context_id
                         FROM chathistory 
                         WHERE user_id = %s
                         ORDER BY timestamp DESC
@@ -678,7 +751,7 @@ class DatabaseManager:
                     """, (user_id, limit))
                 else:
                     cur.execute("""
-                        SELECT id, user_id, session_id, role, message, timestamp 
+                        SELECT id, user_id, session_id, role, message, timestamp, context_type, context_id
                         FROM chathistory 
                         WHERE user_id = ?
                         ORDER BY timestamp DESC
@@ -693,7 +766,9 @@ class DatabaseManager:
                     session_id=row[2],
                     role=row[3],
                     message=row[4],
-                    timestamp=row[5]
+                    timestamp=row[5],
+                    context_type=row[6],
+                    context_id=row[7]
                 )
                 for row in rows
             ]
@@ -753,6 +828,377 @@ class DatabaseManager:
         except Exception as e:
             # If there's an error, return None to fall back to creating a new session
             return None
+        finally:
+            conn.close()
+    
+    def migrate_existing_sessions(self):
+        """Migrate existing chat sessions to new enhanced session format"""
+        conn = None
+        try:
+            conn = self.get_connection()
+            cur = conn.cursor()
+            placeholder = self._get_placeholder()
+            
+            print("Starting migration of existing chat sessions...")
+            
+            # Get all unique session_ids from chathistory that don't exist in chat_sessions
+            if self.use_rds:
+                cur.execute("""
+                    SELECT DISTINCT ch.session_id, ch.user_id, MIN(ch.timestamp) as first_message, MAX(ch.timestamp) as last_message
+                    FROM chathistory ch
+                    LEFT JOIN chat_sessions cs ON ch.session_id = cs.session_id
+                    WHERE cs.session_id IS NULL
+                    GROUP BY ch.session_id, ch.user_id
+                """)
+            else:
+                cur.execute("""
+                    SELECT DISTINCT ch.session_id, ch.user_id, MIN(ch.timestamp) as first_message, MAX(ch.timestamp) as last_message
+                    FROM chathistory ch
+                    LEFT JOIN chat_sessions cs ON ch.session_id = cs.session_id
+                    WHERE cs.session_id IS NULL
+                    GROUP BY ch.session_id, ch.user_id
+                """)
+            
+            sessions_to_migrate = cur.fetchall()
+            migrated_count = 0
+            
+            for session_data in sessions_to_migrate:
+                session_id, user_id, first_message, last_message = session_data
+                
+                # Try to determine context from message content
+                context_type, context_id = self._infer_context_from_messages(cur, session_id, placeholder)
+                
+                # Create session record
+                try:
+                    if self.use_rds:
+                        cur.execute("""
+                            INSERT INTO chat_sessions (session_id, user_id, context_type, context_id, created_at, last_activity, metadata)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """, (session_id, user_id, context_type, context_id, first_message, last_message, '{"migrated": true}'))
+                    else:
+                        cur.execute("""
+                            INSERT INTO chat_sessions (session_id, user_id, context_type, context_id, created_at, last_activity, metadata)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """, (session_id, user_id, context_type, context_id, first_message, last_message, '{"migrated": true}'))
+                    
+                    # Update chathistory records with context information
+                    cur.execute(f"""
+                        UPDATE chathistory 
+                        SET context_type = {placeholder}, context_id = {placeholder}
+                        WHERE session_id = {placeholder}
+                    """, (context_type, context_id, session_id))
+                    
+                    migrated_count += 1
+                    
+                except Exception as e:
+                    print(f"Error migrating session {session_id}: {e}")
+                    continue
+            
+            conn.commit()
+            print(f"Successfully migrated {migrated_count} existing sessions")
+            
+        except Exception as e:
+            print(f"Session migration error: {e}")
+            if conn:
+                conn.rollback()
+        finally:
+            if conn:
+                conn.close()
+    
+    def _infer_context_from_messages(self, cur, session_id: str, placeholder: str) -> tuple:
+        """Infer context type and ID from message content"""
+        # Look for project-related messages
+        cur.execute(f"""
+            SELECT message FROM chathistory 
+            WHERE session_id = {placeholder}
+            AND (message LIKE {placeholder} OR message LIKE {placeholder} OR message LIKE {placeholder})
+            LIMIT 1
+        """, (session_id, "%Project ID:%", "%project_id%", "%Project:%"))
+        
+        project_message = cur.fetchone()
+        if project_message:
+            message = project_message[0]
+            # Try to extract project ID from message
+            import re
+            project_match = re.search(r'Project ID:\s*([a-f0-9]+)', message)
+            if not project_match:
+                project_match = re.search(r'project_id[:\s]*([a-f0-9]+)', message)
+            
+            if project_match:
+                return 'PROJECT', project_match.group(1)
+        
+        # Look for document-related messages
+        cur.execute(f"""
+            SELECT message FROM chathistory 
+            WHERE session_id = {placeholder}
+            AND (message LIKE {placeholder} OR message LIKE {placeholder} OR message LIKE {placeholder})
+            LIMIT 1
+        """, (session_id, "%Document ID:%", "%doc_id%", "%Document:%"))
+        
+        doc_message = cur.fetchone()
+        if doc_message:
+            message = doc_message[0]
+            # Try to extract document ID from message
+            import re
+            doc_match = re.search(r'Document ID:\s*([a-f0-9]+)', message)
+            if not doc_match:
+                doc_match = re.search(r'doc_id[:\s]*([a-f0-9]+)', message)
+            
+            if doc_match:
+                return 'DOCUMENT', doc_match.group(1)
+        
+        # Default to GENERAL context
+        return 'GENERAL', None
+    
+    # Enhanced session management methods
+    def create_chat_session(self, session_id: str, user_id: int, context_type: str, context_id: str = None, metadata: Dict[str, Any] = None) -> bool:
+        """Create a new chat session with context support"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            metadata_json = json.dumps(metadata) if metadata else None
+            
+            cur.execute(f"""
+                INSERT INTO chat_sessions (session_id, user_id, context_type, context_id, metadata)
+                VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
+            """, (session_id, user_id, context_type, context_id, metadata_json))
+            
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception as e:
+            print(f"Error creating chat session: {e}")
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+    
+    def get_session_by_id(self, session_id: str) -> Optional[ChatSession]:
+        """Get session by session ID"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(f"""
+                SELECT id, session_id, user_id, context_type, context_id, is_active, 
+                       created_at, last_activity, metadata
+                FROM chat_sessions 
+                WHERE session_id = {placeholder}
+            """, (session_id,))
+            
+            row = cur.fetchone()
+            if row:
+                metadata = json.loads(row[8]) if row[8] else None
+                return ChatSession(
+                    id=row[0],
+                    session_id=row[1],
+                    user_id=row[2],
+                    context_type=row[3],
+                    context_id=row[4],
+                    is_active=bool(row[5]),
+                    created_at=row[6],
+                    last_activity=row[7],
+                    metadata=metadata
+                )
+            return None
+        finally:
+            conn.close()
+    
+    def get_session_by_context(self, user_id: int, context_type: str, context_id: str = None) -> Optional[ChatSession]:
+        """Get the most recent active session for a specific context"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            if context_id is None:
+                cur.execute(f"""
+                    SELECT id, session_id, user_id, context_type, context_id, is_active, 
+                           created_at, last_activity, metadata
+                    FROM chat_sessions 
+                    WHERE user_id = {placeholder} AND context_type = {placeholder} AND context_id IS NULL
+                    AND is_active = {'TRUE' if self.use_rds else '1'}
+                    ORDER BY last_activity DESC
+                    LIMIT 1
+                """, (user_id, context_type))
+            else:
+                cur.execute(f"""
+                    SELECT id, session_id, user_id, context_type, context_id, is_active, 
+                           created_at, last_activity, metadata
+                    FROM chat_sessions 
+                    WHERE user_id = {placeholder} AND context_type = {placeholder} AND context_id = {placeholder}
+                    AND is_active = {'TRUE' if self.use_rds else '1'}
+                    ORDER BY last_activity DESC
+                    LIMIT 1
+                """, (user_id, context_type, context_id))
+            
+            row = cur.fetchone()
+            if row:
+                metadata = json.loads(row[8]) if row[8] else None
+                return ChatSession(
+                    id=row[0],
+                    session_id=row[1],
+                    user_id=row[2],
+                    context_type=row[3],
+                    context_id=row[4],
+                    is_active=bool(row[5]),
+                    created_at=row[6],
+                    last_activity=row[7],
+                    metadata=metadata
+                )
+            return None
+        finally:
+            conn.close()
+    
+    def get_active_sessions(self, user_id: int, context_type: str = None) -> List[ChatSession]:
+        """Get all active sessions for a user, optionally filtered by context type"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            if context_type:
+                cur.execute(f"""
+                    SELECT id, session_id, user_id, context_type, context_id, is_active, 
+                           created_at, last_activity, metadata
+                    FROM chat_sessions 
+                    WHERE user_id = {placeholder} AND context_type = {placeholder}
+                    AND is_active = {'TRUE' if self.use_rds else '1'}
+                    ORDER BY last_activity DESC
+                """, (user_id, context_type))
+            else:
+                cur.execute(f"""
+                    SELECT id, session_id, user_id, context_type, context_id, is_active, 
+                           created_at, last_activity, metadata
+                    FROM chat_sessions 
+                    WHERE user_id = {placeholder}
+                    AND is_active = {'TRUE' if self.use_rds else '1'}
+                    ORDER BY last_activity DESC
+                """, (user_id,))
+            
+            rows = cur.fetchall()
+            sessions = []
+            for row in rows:
+                metadata = json.loads(row[8]) if row[8] else None
+                sessions.append(ChatSession(
+                    id=row[0],
+                    session_id=row[1],
+                    user_id=row[2],
+                    context_type=row[3],
+                    context_id=row[4],
+                    is_active=bool(row[5]),
+                    created_at=row[6],
+                    last_activity=row[7],
+                    metadata=metadata
+                ))
+            return sessions
+        finally:
+            conn.close()
+    
+    def update_session_activity(self, session_id: str) -> bool:
+        """Update the last activity timestamp for a session"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            if self.use_rds:
+                # MySQL automatically updates last_activity with ON UPDATE CURRENT_TIMESTAMP
+                cur.execute(f"""
+                    UPDATE chat_sessions 
+                    SET last_activity = CURRENT_TIMESTAMP 
+                    WHERE session_id = {placeholder}
+                """, (session_id,))
+            else:
+                # SQLite needs manual timestamp update
+                cur.execute(f"""
+                    UPDATE chat_sessions 
+                    SET last_activity = CURRENT_TIMESTAMP 
+                    WHERE session_id = {placeholder}
+                """, (session_id,))
+            
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception as e:
+            print(f"Error updating session activity: {e}")
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+    
+    def deactivate_session(self, session_id: str) -> bool:
+        """Mark a session as inactive"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(f"""
+                UPDATE chat_sessions 
+                SET is_active = {'FALSE' if self.use_rds else '0'}
+                WHERE session_id = {placeholder}
+            """, (session_id,))
+            
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception as e:
+            print(f"Error deactivating session: {e}")
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+    
+    def cleanup_expired_sessions(self, hours: int = 24) -> int:
+        """Mark sessions as inactive if they haven't been active for the specified hours"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            if self.use_rds:
+                cur.execute(f"""
+                    UPDATE chat_sessions 
+                    SET is_active = FALSE
+                    WHERE is_active = TRUE 
+                    AND last_activity < DATE_SUB(NOW(), INTERVAL {placeholder} HOUR)
+                """, (hours,))
+            else:
+                cur.execute(f"""
+                    UPDATE chat_sessions 
+                    SET is_active = 0
+                    WHERE is_active = 1 
+                    AND datetime(last_activity, '+{placeholder} hours') < datetime('now')
+                """, (hours,))
+            
+            conn.commit()
+            cleaned_count = cur.rowcount
+            print(f"Cleaned up {cleaned_count} expired sessions")
+            return cleaned_count
+        except Exception as e:
+            print(f"Error cleaning up expired sessions: {e}")
+            conn.rollback()
+            return 0
+        finally:
+            conn.close()
+    
+    def add_chat_message_with_context(self, user_id: int, session_id: str, role: str, message: str, context_type: str = None, context_id: str = None):
+        """Add a chat message to history with context information"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(f"""
+                INSERT INTO chathistory (user_id, session_id, role, message, context_type, context_id) 
+                VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
+            """, (user_id, session_id, role, message, context_type, context_id))
+            
+            conn.commit()
+            
+            # Update session activity
+            self.update_session_activity(session_id)
         finally:
             conn.close()
     
@@ -1291,6 +1737,118 @@ class DatabaseManager:
                     
         except Exception as e:
             print(f"Email verification migration error: {e}")
+            if conn:
+                conn.rollback()
+            # Don't raise the exception to prevent breaking initialization
+        finally:
+            if conn:
+                conn.close()
+    
+    def _migrate_session_schema(self):
+        """Migrate existing tables to support enhanced session management"""
+        conn = None
+        try:
+            conn = self.get_connection()
+            cur = conn.cursor()
+            
+            if self.use_rds:
+                # Check if chat_sessions table exists
+                cur.execute("""
+                    SELECT COUNT(*) 
+                    FROM INFORMATION_SCHEMA.TABLES 
+                    WHERE TABLE_SCHEMA = %s 
+                    AND TABLE_NAME = 'chat_sessions'
+                """, (settings.DB_NAME,))
+                
+                table_exists = cur.fetchone()[0] > 0
+                
+                if not table_exists:
+                    print("Creating chat_sessions table (MySQL)...")
+                    cur.execute("""
+                        CREATE TABLE chat_sessions(
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            session_id VARCHAR(255) UNIQUE NOT NULL,
+                            user_id INT NOT NULL,
+                            context_type ENUM('PROJECT', 'DOCUMENT', 'GENERAL') NOT NULL,
+                            context_id VARCHAR(255) NULL,
+                            is_active BOOLEAN DEFAULT TRUE,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            metadata JSON NULL,
+                            FOREIGN KEY (user_id) REFERENCES userdata(id) ON DELETE CASCADE,
+                            INDEX idx_user_context (user_id, context_type, context_id),
+                            INDEX idx_session_id (session_id),
+                            INDEX idx_last_activity (last_activity),
+                            INDEX idx_active_sessions (user_id, is_active)
+                        ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """)
+                    conn.commit()
+                    print("chat_sessions table created successfully")
+                
+                # Check if context columns exist in chathistory table
+                cur.execute("""
+                    SELECT COUNT(*) 
+                    FROM INFORMATION_SCHEMA.COLUMNS 
+                    WHERE TABLE_SCHEMA = %s 
+                    AND TABLE_NAME = 'chathistory' 
+                    AND COLUMN_NAME = 'context_type'
+                """, (settings.DB_NAME,))
+                
+                context_columns_exist = cur.fetchone()[0] > 0
+                
+                if not context_columns_exist:
+                    print("Adding context columns to chathistory table (MySQL)...")
+                    cur.execute("ALTER TABLE chathistory ADD COLUMN context_type ENUM('PROJECT', 'DOCUMENT', 'GENERAL') NULL")
+                    cur.execute("ALTER TABLE chathistory ADD COLUMN context_id VARCHAR(255) NULL")
+                    cur.execute("CREATE INDEX idx_chathistory_context ON chathistory (context_type, context_id)")
+                    conn.commit()
+                    print("Context columns added to chathistory table successfully")
+                    
+            else:
+                # Check if chat_sessions table exists in SQLite
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='chat_sessions'")
+                table_exists = cur.fetchone() is not None
+                
+                if not table_exists:
+                    print("Creating chat_sessions table (SQLite)...")
+                    cur.execute("""
+                        CREATE TABLE chat_sessions(
+                            id INTEGER PRIMARY KEY,
+                            session_id TEXT UNIQUE NOT NULL,
+                            user_id INTEGER NOT NULL,
+                            context_type TEXT NOT NULL CHECK (context_type IN ('PROJECT', 'DOCUMENT', 'GENERAL')),
+                            context_id TEXT NULL,
+                            is_active BOOLEAN DEFAULT 1,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            metadata TEXT NULL,
+                            FOREIGN KEY (user_id) REFERENCES userdata(id) ON DELETE CASCADE
+                        )
+                    """)
+                    
+                    # Create indexes
+                    cur.execute("CREATE INDEX idx_chat_sessions_user_context ON chat_sessions (user_id, context_type, context_id)")
+                    cur.execute("CREATE INDEX idx_chat_sessions_session_id ON chat_sessions (session_id)")
+                    cur.execute("CREATE INDEX idx_chat_sessions_last_activity ON chat_sessions (last_activity)")
+                    cur.execute("CREATE INDEX idx_chat_sessions_active ON chat_sessions (user_id, is_active)")
+                    
+                    conn.commit()
+                    print("chat_sessions table created successfully")
+                
+                # Check if context columns exist in chathistory table
+                cur.execute("PRAGMA table_info(chathistory)")
+                columns = [row[1] for row in cur.fetchall()]
+                
+                if 'context_type' not in columns:
+                    print("Adding context columns to chathistory table (SQLite)...")
+                    cur.execute("ALTER TABLE chathistory ADD COLUMN context_type TEXT NULL CHECK (context_type IN ('PROJECT', 'DOCUMENT', 'GENERAL') OR context_type IS NULL)")
+                    cur.execute("ALTER TABLE chathistory ADD COLUMN context_id TEXT NULL")
+                    cur.execute("CREATE INDEX idx_chathistory_context ON chathistory (context_type, context_id)")
+                    conn.commit()
+                    print("Context columns added to chathistory table successfully")
+                    
+        except Exception as e:
+            print(f"Session schema migration error: {e}")
             if conn:
                 conn.rollback()
             # Don't raise the exception to prevent breaking initialization

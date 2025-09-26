@@ -78,6 +78,20 @@ class Settings:
     CHAT_HISTORY_LIMIT = 20
     SESSION_CLEANUP_HOURS = 24
     
+    # Enhanced Session Management Configuration
+    SESSION_CACHE_MAX_SIZE = int(os.getenv('SESSION_CACHE_MAX_SIZE', 1000))
+    SESSION_MAINTENANCE_INTERVAL = int(os.getenv('SESSION_MAINTENANCE_INTERVAL', 3600))  # 1 hour
+    SESSION_ACTIVITY_UPDATE_PROBABILITY = float(os.getenv('SESSION_ACTIVITY_UPDATE_PROBABILITY', 0.01))  # 1%
+    SESSION_CLEANUP_PROBABILITY = float(os.getenv('SESSION_CLEANUP_PROBABILITY', 0.01))  # 1%
+    
+    # Context Validation Settings
+    ENABLE_STRICT_CONTEXT_VALIDATION = os.getenv('ENABLE_STRICT_CONTEXT_VALIDATION', 'true').lower() == 'true'
+    ALLOW_CONTEXT_SWITCHING = os.getenv('ALLOW_CONTEXT_SWITCHING', 'true').lower() == 'true'
+    
+    # Session Security Settings
+    SESSION_ACCESS_VALIDATION_ENABLED = os.getenv('SESSION_ACCESS_VALIDATION_ENABLED', 'true').lower() == 'true'
+    SESSION_EXPIRY_GRACE_PERIOD_HOURS = int(os.getenv('SESSION_EXPIRY_GRACE_PERIOD_HOURS', 1))
+    
     # File Configuration
     FILE_DELETE_DELAY = 3600  # 1 hour
     CHAT_FILE_DELETE_DELAY = 7200  # 2 hours
