@@ -848,15 +848,39 @@ def verify_detections(image_path: str, objects_json: str, requested_object: str)
         response = {
             "requested_object_found": False,
             "class_counts": class_counts,
-            "message": ""
+            "message": "",
+            "suggested_filter_condition": ""
         }
 
         requested_object_lower = requested_object.lower()
-        if any(requested_object_lower in cls for cls in class_counts.keys()):
+        found_classes = []
+        
+        # Check for exact matches and partial matches
+        for cls in class_counts.keys():
+            if requested_object_lower == cls:
+                # Exact match
+                found_classes.append(cls)
+                break
+            elif requested_object_lower in cls or cls in requested_object_lower:
+                # Partial match
+                found_classes.append(cls)
+        
+        if found_classes:
             response['requested_object_found'] = True
-            response['message'] = f"Verification successful: Detections include objects matching '{requested_object}'."
+            matched_class = found_classes[0]
+            count = class_counts[matched_class]
+            response['message'] = f"Verification successful: Found {count} objects matching '{requested_object}' (class: '{matched_class}')."
+            response['suggested_filter_condition'] = matched_class
         else:
+            # No matches found
             response['message'] = f"Verification failed: No objects matching '{requested_object}' were detected. Available classes: {sorted(list(class_counts.keys()))}"
+            # Try to suggest the most similar class name
+            if class_counts:
+                # Find the most similar class name
+                import difflib
+                closest_matches = difflib.get_close_matches(requested_object_lower, class_counts.keys(), n=3, cutoff=0.3)
+                if closest_matches:
+                    response['message'] += f"\n\nDid you mean one of these? {closest_matches}"
 
         return json.dumps(response, indent=2)
 

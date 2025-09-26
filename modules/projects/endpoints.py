@@ -4,6 +4,8 @@ Project management API endpoints for the Floor Plan Agent API
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from typing import Optional, List
 from modules.projects.service import project_service
+from modules.agent.workflow import agent_workflow
+from modules.database import db_manager
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -22,6 +24,9 @@ async def create_project(
         print(f"Debug: received files: {files}")
         print(f"Debug: files is None: {files is None}")
         print(f"Debug: files length: {len(files) if files else 0}")
+        
+        # Create a new session for this project
+        session_id = agent_workflow.get_or_create_chat_session()
         
         if files and len(files) > 0 and files[0].filename != '':
             # Validate file types and process files
@@ -51,6 +56,9 @@ async def create_project(
                 user_id=user_id
             )
         
+        # Add session_id to the response
+        result["session_id"] = session_id
+        
         return result
         
     except ValueError as e:
@@ -73,6 +81,9 @@ async def create_project_single_file(
         print(f"Debug: file is None: {file is None}")
         if file:
             print(f"Debug: filename: {file.filename}")
+        
+        # Create a new session for this project
+        session_id = agent_workflow.get_or_create_chat_session()
         
         if file and file.filename and file.filename != '':
             # Validate file type
@@ -100,6 +111,9 @@ async def create_project_single_file(
                 user_id=user_id
             )
         
+        # Add session_id to the response
+        result["session_id"] = session_id
+        
         return result
         
     except ValueError as e:
@@ -108,12 +122,24 @@ async def create_project_single_file(
         raise HTTPException(status_code=500, detail=f"Project creation failed: {str(e)}")
 
 @router.get("/{project_id}")
-async def get_project(project_id: str):
+async def get_project(project_id: str, user_id: int = None):
     """Get project information by project ID"""
     try:
         project = project_service.get_project(project_id)
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
+        
+        # Add a session ID to the response for continuity
+        # If user_id is provided, try to find an existing session for this project
+        session_id = None
+        if user_id is not None:
+            session_id = db_manager.get_project_session(user_id, project_id)
+        
+        # If no existing session found, create a new one
+        if not session_id:
+            session_id = agent_workflow.get_or_create_chat_session()
+            
+        project["session_id"] = session_id
         
         return project
         

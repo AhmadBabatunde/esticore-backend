@@ -728,6 +728,34 @@ class DatabaseManager:
         finally:
             conn.close()
     
+    def get_project_session(self, user_id: int, project_id: str) -> Optional[str]:
+        """Get the most recent session ID associated with a specific project for a user"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            # Search for chat messages that mention the project ID
+            # This looks for messages that contain the project ID in the content
+            cur.execute(f"""
+                SELECT session_id, MAX(timestamp) as last_activity
+                FROM chathistory 
+                WHERE user_id = {placeholder} 
+                AND (message LIKE {placeholder} OR message LIKE {placeholder})
+                GROUP BY session_id
+                ORDER BY last_activity DESC
+                LIMIT 1
+            """, (user_id, f"%Project ID: {project_id}%", f"%project_id%{project_id}%"))
+            
+            row = cur.fetchone()
+            return row[0] if row else None
+            
+        except Exception as e:
+            # If there's an error, return None to fall back to creating a new session
+            return None
+        finally:
+            conn.close()
+    
     # Project management methods
     def create_project(self, project_id: str, name: str, description: str, user_id: int, doc_ids: Optional[List[str]] = None) -> int:
         """Create a new project"""

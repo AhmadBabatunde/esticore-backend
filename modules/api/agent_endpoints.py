@@ -116,6 +116,11 @@ Optimized Instructions for AI Agent:
 3. FOR ANNOTATION/HIGHLIGHTING requests:
    - Follow the standard annotation workflow:
    - Load PDF → Convert to image → Detect objects → Apply annotation → Save PDF
+   - When the user requests to annotate specific items (e.g., "highlight all doors", "circle windows"):
+     * Use the detect_floor_plan_objects tool to get all objects
+     * Use the verify_detections tool to check if the requested object type exists
+     * Use the appropriate annotation tool with the filter_condition parameter to target only those specific items
+     * ALWAYS call save_annotated_image_as_pdf_page at the end
 
 4. PERFORMANCE PRIORITY:
    - Choose the fastest tool that can adequately answer the question
@@ -419,10 +424,13 @@ Instructions for AI Agent:
    - ALWAYS use answer_question_with_suggestions (not answer_question_using_rag)
    - This function returns structured JSON with answer and suggestions array
    - Do NOT format suggestions manually in text - let the function handle it
-5. If they want to ANNOTATE/HIGHLIGHT/MARK something, follow the annotation workflow:
+5. If they want to ANNOTATE/HIGHLIGHT/MARK something:
    - Load PDF
    - Convert page to image  
    - Detect objects
+   - When the user requests to annotate specific items (e.g., "highlight all doors", "circle windows"):
+     * Use the verify_detections tool to check if the requested object type exists
+     * Use the appropriate annotation tool with the filter_condition parameter to target only those specific items
    - Apply requested annotation
    - Save annotated PDF
 6. Consider project context and conversation history

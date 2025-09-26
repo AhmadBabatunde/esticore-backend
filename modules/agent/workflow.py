@@ -151,7 +151,7 @@ class AgentWorkflow:
     def _create_prompt(self):
         """Create the agent prompt template"""
         return ChatPromptTemplate.from_messages([
-            ("system", """You are an expert Civil Engeneering AI assistant for working with floor plan documents. You can both answer questions about the documents and annotate specific pages.
+            ("system", """You are an expert Civil Engineering AI assistant for working with floor plan documents. You can both answer questions about the documents and annotate specific pages.
 
 **Workflow for Annotation Requests:**
 1.  **Load & Validate PDF**: Use `load_pdf_for_floorplan` to check the PDF.
@@ -186,6 +186,7 @@ class AgentWorkflow:
 - Only call one annotation tool per request.
 - The final output for annotation should be a complete PDF with only the specified page annotated.
 - When saving, use the exact output_path provided in the state.
+- When the user requests to annotate specific items (e.g., "highlight all doors", "circle windows"), use the filter_condition parameter in the annotation tools to target only those specific items.
 
 **State Information:**
 You have access to:
