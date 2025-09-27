@@ -187,10 +187,7 @@ You have access to:
             return "action" if state["messages"][-1].tool_calls else END
 
         def call_agent(state: FloorPlanState):
-            # Add memory context to the state
-            memory_context = self.memory.load_memory_variables({})
-
-            # Create a more detailed message that includes state information
+            # Only use the latest user message for agent reasoning
             original_message = state["messages"][-1].content if state["messages"] else ""
 
             # Add state context to help the agent understand what it needs to do
@@ -209,17 +206,13 @@ You have access to:
             - output_pdf_path: {state.get('output_path', '')}
             """
 
-            # Update the state with the context message
+            # Only pass the latest message and context to the agent
             state_with_context = state.copy()
-            state_with_context["messages"] = state["messages"][:-1] + [HumanMessage(content=context_message)]
-
-            if memory_context and "history" in memory_context and memory_context["history"]:
-                # Add memory to the conversation
-                state_with_context["messages"].append(HumanMessage(content=f"Memory context: {memory_context['history']}"))
+            state_with_context["messages"] = [HumanMessage(content=context_message)]
 
             response = self.agent_executor.invoke(state_with_context)
 
-            # Save to memory
+            # Save to memory (for logging, not for agent reasoning)
             self.memory.save_context({"input": original_message}, {"output": response["output"]})
 
             return {"messages": [AIMessage(content=response["output"])]}
