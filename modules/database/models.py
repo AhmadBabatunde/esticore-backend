@@ -748,9 +748,6 @@ class DatabaseManager:
         self._migrate_documents_schema()
         self._migrate_email_verification_schema()
         self._migrate_session_schema()
-        
-        # Migrate existing session data (run after schema migration)
-        self.migrate_existing_sessions()
     
     def _migrate_documents_schema(self):
         """Migrate documents table to include vector_path column if it doesn't exist"""
@@ -1697,125 +1694,6 @@ class DatabaseManager:
         finally:
             conn.close()
     
-    def migrate_existing_sessions(self):
-        """Migrate existing chat sessions to new enhanced session format"""
-        conn = None
-        try:
-            conn = self.get_connection()
-            cur = conn.cursor()
-            placeholder = self._get_placeholder()
-            
-            print("Starting migration of existing chat sessions...")
-            
-            # Get all unique session_ids from chathistory that don't exist in chat_sessions
-            if self.use_rds:
-                cur.execute("""
-                    SELECT DISTINCT ch.session_id, ch.user_id, MIN(ch.timestamp) as first_message, MAX(ch.timestamp) as last_message
-                    FROM chathistory ch
-                    LEFT JOIN chat_sessions cs ON ch.session_id = cs.session_id
-                    WHERE cs.session_id IS NULL
-                    GROUP BY ch.session_id, ch.user_id
-                """)
-            else:
-                cur.execute("""
-                    SELECT DISTINCT ch.session_id, ch.user_id, MIN(ch.timestamp) as first_message, MAX(ch.timestamp) as last_message
-                    FROM chathistory ch
-                    LEFT JOIN chat_sessions cs ON ch.session_id = cs.session_id
-                    WHERE cs.session_id IS NULL
-                    GROUP BY ch.session_id, ch.user_id
-                """)
-            
-            sessions_to_migrate = cur.fetchall()
-            migrated_count = 0
-            
-            for session_data in sessions_to_migrate:
-                session_id, user_id, first_message, last_message = session_data
-                
-                # Try to determine context from message content
-                context_type, context_id = self._infer_context_from_messages(cur, session_id, placeholder)
-                
-                # Create session record
-                try:
-                    if self.use_rds:
-                        cur.execute("""
-                            INSERT INTO chat_sessions (session_id, user_id, context_type, context_id, created_at, last_activity, metadata)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """, (session_id, user_id, context_type, context_id, first_message, last_message, '{"migrated": true}'))
-                    else:
-                        cur.execute("""
-                            INSERT INTO chat_sessions (session_id, user_id, context_type, context_id, created_at, last_activity, metadata)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """, (session_id, user_id, context_type, context_id, first_message, last_message, '{"migrated": true}'))
-                    
-                    # Update chathistory records with context information
-                    cur.execute(f"""
-                        UPDATE chathistory 
-                        SET context_type = {placeholder}, context_id = {placeholder}
-                        WHERE session_id = {placeholder}
-                    """, (context_type, context_id, session_id))
-                    
-                    migrated_count += 1
-                    
-                except Exception as e:
-                    print(f"Error migrating session {session_id}: {e}")
-                    continue
-            
-            conn.commit()
-            print(f"Successfully migrated {migrated_count} existing sessions")
-            
-        except Exception as e:
-            print(f"Session migration error: {e}")
-            if conn:
-                conn.rollback()
-        finally:
-            if conn:
-                conn.close()
-    
-    def _infer_context_from_messages(self, cur, session_id: str, placeholder: str) -> tuple:
-        """Infer context type and ID from message content"""
-        # Look for project-related messages
-        cur.execute(f"""
-            SELECT message FROM chathistory 
-            WHERE session_id = {placeholder}
-            AND (message LIKE {placeholder} OR message LIKE {placeholder} OR message LIKE {placeholder})
-            LIMIT 1
-        """, (session_id, "%Project ID:%", "%project_id%", "%Project:%"))
-        
-        project_message = cur.fetchone()
-        if project_message:
-            message = project_message[0]
-            # Try to extract project ID from message
-            import re
-            project_match = re.search(r'Project ID:\s*([a-f0-9]+)', message)
-            if not project_match:
-                project_match = re.search(r'project_id[:\s]*([a-f0-9]+)', message)
-            
-            if project_match:
-                return 'PROJECT', project_match.group(1)
-        
-        # Look for document-related messages
-        cur.execute(f"""
-            SELECT message FROM chathistory 
-            WHERE session_id = {placeholder}
-            AND (message LIKE {placeholder} OR message LIKE {placeholder} OR message LIKE {placeholder})
-            LIMIT 1
-        """, (session_id, "%Document ID:%", "%doc_id%", "%Document:%"))
-        
-        doc_message = cur.fetchone()
-        if doc_message:
-            message = doc_message[0]
-            # Try to extract document ID from message
-            import re
-            doc_match = re.search(r'Document ID:\s*([a-f0-9]+)', message)
-            if not doc_match:
-                doc_match = re.search(r'doc_id[:\s]*([a-f0-9]+)', message)
-            
-            if doc_match:
-                return 'DOCUMENT', doc_match.group(1)
-        
-        # Default to GENERAL context
-        return 'GENERAL', None
-    
     # Enhanced session management methods
     def create_chat_session(self, session_id: str, user_id: int, context_type: str, context_id: str = None, metadata: Dict[str, Any] = None) -> bool:
         """Create a new chat session with context support"""
@@ -2028,7 +1906,7 @@ class DatabaseManager:
                     UPDATE chat_sessions 
                     SET is_active = FALSE
                     WHERE is_active = TRUE 
-                    AND last_activity < DATE_SUB(NOW(), INTERVAL {placeholder} HOUR)
+                    AND last_activity < NOW() - INTERVAL '{placeholder} hours'
                 """, (hours,))
             else:
                 cur.execute(f"""

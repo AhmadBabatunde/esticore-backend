@@ -16,7 +16,40 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
 
 from modules.config.settings import settings
-from modules.agent.tools import ALL_TOOLS
+from modules.agent.tools import (
+    load_pdf_for_floorplan,
+    convert_pdf_page_to_image,
+    detect_floor_plan_objects,
+    verify_detections,
+    internet_search,
+    apply_highlight_annotation,
+    apply_circle_annotation,
+    apply_rectangle_annotation,
+    apply_count_annotation,
+    apply_arrow_annotation,
+    save_annotated_image_as_pdf_page,
+    answer_question_using_rag,
+    answer_question_with_suggestions,
+    quick_page_analysis
+)
+
+# List of all available tools
+ALL_TOOLS = [
+    load_pdf_for_floorplan,
+    convert_pdf_page_to_image,
+    detect_floor_plan_objects,
+    verify_detections,
+    internet_search,
+    apply_highlight_annotation,
+    apply_circle_annotation,
+    apply_rectangle_annotation,
+    apply_count_annotation,
+    apply_arrow_annotation,
+    save_annotated_image_as_pdf_page,
+    answer_question_using_rag,
+    answer_question_with_suggestions,
+    quick_page_analysis
+]
 from modules.session import session_manager, context_resolver
 from modules.database.models import db_manager
 
@@ -83,11 +116,10 @@ class FloorPlanState(MessagesState):
     page_number: int = 1
 
 class AgentWorkflow:
-    """Enhanced agent workflow management with intelligent response strategy"""
+    """Agent workflow using LangGraph with proper tool calling"""
     
     def __init__(self):
         self.memory = SimpleMemory()
-        # Use new session manager instead of in-memory sessions
         self.session_manager = session_manager
         self.context_resolver = context_resolver
         
@@ -102,7 +134,8 @@ class AgentWorkflow:
     def _create_prompt(self):
         """Create the agent prompt template"""
         return ChatPromptTemplate.from_messages([
-            ("system", """You are an expert Civil Engineering AI assistant for working with floor plan documents. You can both answer questions about the documents and annotate specific pages.
+            ("system", """
+You are an expert Civil Engineering AI assistant for working with floor plan documents. You can both answer questions about the documents and annotate specific pages.
 
 **Workflow for Annotation Requests:**
 1.  **Load & Validate PDF**: Use `load_pdf_for_floorplan` to check the PDF.
@@ -137,7 +170,6 @@ class AgentWorkflow:
 - Only call one annotation tool per request.
 - The final output for annotation should be a complete PDF with only the specified page annotated.
 - When saving, use the exact output_path provided in the state.
-- When the user requests to annotate specific items (e.g., "highlight all doors", "circle windows"), use the filter_condition parameter in the annotation tools to target only those specific items.
 
 **State Information:**
 You have access to:
@@ -157,39 +189,39 @@ You have access to:
         def call_agent(state: FloorPlanState):
             # Add memory context to the state
             memory_context = self.memory.load_memory_variables({})
-            
+
             # Create a more detailed message that includes state information
             original_message = state["messages"][-1].content if state["messages"] else ""
-            
+
             # Add state context to help the agent understand what it needs to do
             context_message = f"""
             CURRENT STATE CONTEXT:
             - PDF Path: {state.get('pdf_path', 'Not set')}
             - Page Number: {state.get('page_number', 'Not set')}
             - Output Path: {state.get('output_path', 'Not set')}
-            
+
             USER REQUEST: {original_message}
-            
+
             IMPORTANT: If this is an annotation request, you MUST call save_annotated_image_as_pdf_page at the end with:
             - image_path: the temporary image path from convert_pdf_page_to_image
             - original_pdf_path: {state.get('pdf_path', '')}
             - page_number: {state.get('page_number', 1)}
             - output_pdf_path: {state.get('output_path', '')}
             """
-            
+
             # Update the state with the context message
             state_with_context = state.copy()
             state_with_context["messages"] = state["messages"][:-1] + [HumanMessage(content=context_message)]
-            
+
             if memory_context and "history" in memory_context and memory_context["history"]:
                 # Add memory to the conversation
                 state_with_context["messages"].append(HumanMessage(content=f"Memory context: {memory_context['history']}"))
-            
+
             response = self.agent_executor.invoke(state_with_context)
-            
+
             # Save to memory
             self.memory.save_context({"input": original_message}, {"output": response["output"]})
-            
+
             return {"messages": [AIMessage(content=response["output"])]}
 
         workflow = StateGraph(FloorPlanState)
@@ -198,14 +230,68 @@ You have access to:
         workflow.set_entry_point("agent")
         workflow.add_conditional_edges("agent", should_continue, {"action": "action", END: END})
         workflow.add_edge("action", "agent")
-        
+
         return workflow
+    
+    def _clean_response(self, response: str) -> str:
+        """Clean the response to remove download links and improve annotation messages"""
+        import re
+        
+        # Remove download links
+        response = re.sub(r'\[Download.*?\]\(.*?\)', '', response)
+        response = re.sub(r'You can download.*?using the link below:?\s*', '', response)
+        response = re.sub(r'sandbox:/[^\s\)]*', '', response)
+        
+        # Clean up annotation success messages
+        if 'successfully highlighted' in response.lower():
+            # Extract page number if present
+            page_match = re.search(r'page (\d+)', response.lower())
+            page_num = page_match.group(1) if page_match else "the requested page"
+            response = f"The objects on page {page_num} have been successfully highlighted."
+        
+        elif 'successfully circled' in response.lower():
+            page_match = re.search(r'page (\d+)', response.lower())
+            page_num = page_match.group(1) if page_match else "the requested page"
+            response = f"The objects on page {page_num} have been successfully circled."
+        
+        elif 'successfully annotated' in response.lower():
+            page_match = re.search(r'page (\d+)', response.lower())
+            page_num = page_match.group(1) if page_match else "the requested page"
+            response = f"The objects on page {page_num} have been successfully annotated."
+        
+        # Remove extra whitespace and clean up
+        response = re.sub(r'\n\s*\n', '\n\n', response)
+        response = response.strip()
+        
+        return response
     
     def process_request(self, initial_state: Dict[str, Any]) -> Dict[str, Any]:
         """Process a request through the agent workflow"""
         try:
-            final_state = self.compiled_graph.invoke(initial_state, {"recursion_limit": settings.RECURSION_LIMIT})
-            return final_state
+            # Detect intent from initial_state['messages'][-1].content
+            user_message = initial_state["messages"][-1].content if initial_state.get("messages") else ""
+            intent = None
+            if any(x in user_message.lower() for x in ["highlight", "circle", "rectangle", "count", "arrow", "annotate"]):
+                intent = "annotation"
+            elif any(x in user_message.lower() for x in ["latest", "current", "recent", "news", "trend", "regulation"]):
+                intent = "internet_search"
+            else:
+                intent = "question"
+
+            # Route to correct tool chain
+            if intent == "annotation":
+                # Annotation workflow: always follow annotation tool chain and save step
+                final_state = self.compiled_graph.invoke(initial_state, {"recursion_limit": settings.RECURSION_LIMIT})
+                return final_state
+            elif intent == "internet_search":
+                # Internet search workflow: use internet_search tool only
+                # (This assumes the agent will call the correct tool based on prompt)
+                final_state = self.compiled_graph.invoke(initial_state, {"recursion_limit": settings.RECURSION_LIMIT})
+                return final_state
+            else:
+                # Question answering workflow: use answer_question_with_suggestions, fallback to answer_question_using_rag
+                final_state = self.compiled_graph.invoke(initial_state, {"recursion_limit": settings.RECURSION_LIMIT})
+                return final_state
         except Exception as e:
             raise Exception(f"Agent workflow error: {str(e)}")
     

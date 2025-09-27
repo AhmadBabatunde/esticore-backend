@@ -230,6 +230,39 @@ If some aspects of the question cannot be fully answered from the available sour
             fallback_answer += f"Current information: {web_content}\n\n"
         return fallback_answer or f"I understand you're asking about {question}. This appears to be an important topic that would benefit from consulting current expert sources and documentation."
 
+def should_use_internet_search(question: str) -> bool:
+    """Determine if a question requires internet search based on keywords and context."""
+    question_lower = question.lower()
+    
+    # Greetings and simple interactions - no search needed
+    greeting_patterns = ['hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening', 'how are you', 'thanks', 'thank you']
+    if any(greeting in question_lower for greeting in greeting_patterns):
+        return False
+    
+    # Keywords that indicate need for current/recent information
+    current_info_keywords = [
+        'current', 'recent', 'latest', 'new', 'updated', 'today', 'now', 'this year', 
+        'market trends', 'news', 'regulations', 'standards', 'prices', 'cost', 
+        'what is happening', 'what happened', 'recent developments', 'updates'
+    ]
+    
+    # Keywords that indicate document-based questions
+    document_keywords = [
+        'page', 'document', 'pdf', 'floor plan', 'drawing', 'diagram', 'layout',
+        'what does this show', 'what is on', 'describe', 'analyze', 'explain this'
+    ]
+    
+    # If question contains document-specific keywords, don't search internet
+    if any(keyword in question_lower for keyword in document_keywords):
+        return False
+    
+    # If question explicitly asks for current information, search internet
+    if any(keyword in question_lower for keyword in current_info_keywords):
+        return True
+    
+    # Default: don't search internet unless explicitly needed
+    return False
+
 def process_question_with_hybrid_search(doc_id: str, question: str, include_suggestions: bool = False) -> Dict:
     """Process question using both document RAG and internet search for comprehensive answers with concurrent processing."""
     doc_content = ""
@@ -245,31 +278,47 @@ def process_question_with_hybrid_search(doc_id: str, question: str, include_sugg
     doc_result = {"content": "", "citations": [], "most_referenced_page": None}
     web_result = {"content": ""}
     
+    # Check if internet search is needed
+    needs_internet_search = should_use_internet_search(question)
+    
     def fetch_document_content():
         """Fetch document content in a separate thread with image analysis support."""
         try:
             print(f"DEBUG: Retrieving document content for: {question}")
-            vs = pdf_processor.load_vectorstore(doc_id)
-            docs = vs.similarity_search(question, k=8)
-            
+            docs = None
+            if getattr(pdf_processor, 'use_database_storage', False):
+                docs = pdf_processor.query_document_vectors(doc_id, question, k=8)
+                # docs is a list of dicts with 'page' and 'text'
+            else:
+                vs = pdf_processor.load_vectorstore(doc_id)
+                docs = vs.similarity_search(question, k=8)
+                # docs is a list of objects with .metadata and .page_content
+
             if docs:
                 # Create citations from docs
                 doc_citations = []
                 for i, doc in enumerate(docs):
-                    doc_citations.append({
-                        "id": i + 1,
-                        "page": doc.metadata.get("page", 1),
-                        "text": doc.page_content,
-                        "relevance_score": 0.8,
-                        "doc_id": doc_id
-                    })
-                
+                    if isinstance(doc, dict):
+                        doc_citations.append({
+                            "id": i + 1,
+                            "page": doc.get("page", 1),
+                            "text": doc.get("text", ""),
+                            "relevance_score": 0.8,
+                            "doc_id": doc_id
+                        })
+                    else:
+                        doc_citations.append({
+                            "id": i + 1,
+                            "page": doc.metadata.get("page", 1),
+                            "text": doc.page_content,
+                            "relevance_score": 0.8,
+                            "doc_id": doc_id
+                        })
                 # Find most referenced page
                 page_counts = {}
                 for citation in doc_citations:
                     page = citation["page"]
                     page_counts[page] = page_counts.get(page, 0) + 1
-                
                 doc_most_referenced = None
                 if page_counts:
                     doc_most_referenced = max(page_counts.items(), key=lambda x: x[1])[0]
@@ -360,25 +409,32 @@ Provide only relevant information (max 2 sentences). If no relevant info, respon
             print(f"DEBUG: Error retrieving document content: {e}")
     
     def fetch_web_content():
-        """Fetch web content in a separate thread."""
+        """Fetch web content in a separate thread - only if needed."""
         try:
-            print(f"DEBUG: Searching internet for: {question}")
-            web_result["content"] = get_internet_search_results(question, max_results=2)  # Reduced for speed
+            if needs_internet_search:
+                print(f"DEBUG: Searching internet for: {question}")
+                web_result["content"] = get_internet_search_results(question, max_results=2)  # Reduced for speed
+            else:
+                print(f"DEBUG: Skipping internet search for: {question}")
         except Exception as e:
             print(f"DEBUG: Error fetching web content: {e}")
     
     try:
-        # Execute both operations concurrently for maximum speed
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            # Submit both tasks
-            doc_future = executor.submit(fetch_document_content)
-            web_future = executor.submit(fetch_web_content)
-            
-            # Wait for both to complete with timeout for speed
-            try:
-                concurrent.futures.wait([doc_future, web_future], timeout=10.0)  # 10 second timeout
-            except concurrent.futures.TimeoutError:
-                print("DEBUG: Timeout in concurrent processing, proceeding with available results")
+        # Execute operations - concurrent only if internet search is needed
+        if needs_internet_search:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                # Submit both tasks
+                doc_future = executor.submit(fetch_document_content)
+                web_future = executor.submit(fetch_web_content)
+                
+                # Wait for both to complete with timeout for speed
+                try:
+                    concurrent.futures.wait([doc_future, web_future], timeout=10.0)  # 10 second timeout
+                except concurrent.futures.TimeoutError:
+                    print("DEBUG: Timeout in concurrent processing, proceeding with available results")
+        else:
+            # Only fetch document content
+            fetch_document_content()
         
         # Extract results
         doc_content = doc_result["content"]
@@ -889,20 +945,40 @@ def verify_detections(image_path: str, objects_json: str, requested_object: str)
 
 @tool
 def answer_question_using_rag(doc_id: str, question: str) -> str:
-    """Answer questions using both document content and internet search for comprehensive responses."""
+    """Answer questions using document content only - simple and fast."""
     try:
-        print(f"DEBUG: Processing question with hybrid approach: {question}")
-        
-        # Use the new hybrid search function
-        result = process_question_with_hybrid_search(doc_id, question, include_suggestions=False)
-        
-        # Return the comprehensive answer
-        return result["answer"]
-        
+        print(f"DEBUG: Processing question with document-only approach: {question}")
+        docs = None
+        if getattr(pdf_processor, 'use_database_storage', False):
+            docs = pdf_processor.query_document_vectors(doc_id, question, k=4)
+            # docs is a list of dicts with 'page' and 'text'
+            context = "\n\n".join([f"Page {d.get('page', 'N/A')}: {d.get('text', '')}" for d in docs[:3]])
+        else:
+            vs = pdf_processor.load_vectorstore(doc_id)
+            docs = vs.similarity_search(question, k=4)
+            # docs is a list of objects with .metadata and .page_content
+            context = "\n\n".join([f"Page {d.metadata.get('page', 'N/A')}: {d.page_content}" for d in docs[:3]])
+
+        if not docs:
+            return "I couldn't find any relevant information in the document to answer your question."
+
+        # Use LLM to generate a response based on the context
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+        prompt = f"""Based on the following context from the document, answer the user's question concisely.
+
+Context:
+{context}
+
+User question: {question}
+
+Provide a helpful and accurate answer:"""
+
+        rag_response = llm.invoke(prompt)
+        return rag_response.content
+
     except Exception as e:
-        print(f"DEBUG: Error in hybrid RAG: {e}")
-        # Provide a helpful fallback response even on error
-        return f"I understand you're asking about: {question}. This is an important topic that requires comprehensive analysis. I recommend consulting current documentation, expert resources, and up-to-date information sources for the most complete understanding."
+        print(f"DEBUG: Error in document RAG: {e}")
+        return f"I encountered an error while processing your question. Please try rephrasing your question or check if the document is properly loaded."
 
 @tool
 def quick_page_analysis(doc_id: str, page_number: int = 1) -> str:
@@ -1039,55 +1115,93 @@ def encode_image(image_path):
 
 @tool
 def answer_question_with_suggestions(doc_id: str, question: str) -> str:
-    """Answer questions with comprehensive hybrid approach including suggestions and fast response."""
+    """Answer questions about the document using simple RAG with suggestions - no hybrid approach."""
     try:
-        print(f"DEBUG: Processing question with hybrid approach and suggestions: {question}")
+        print(f"DEBUG: Processing question with document-only approach: {question}")
         
-        # Use the new hybrid search function with suggestions enabled
-        result = process_question_with_hybrid_search(doc_id, question, include_suggestions=True)
-        
-        # Format the response as JSON with all components
+        # Use simple document search only
+        docs = None
+        if getattr(pdf_processor, 'use_database_storage', False):
+            docs = pdf_processor.query_document_vectors(doc_id, question, k=6)
+            context = "\n\n".join([f"Page {d.get('page', 'N/A')}: {d.get('text', '')}" for d in docs[:4]])
+        else:
+            vs = pdf_processor.load_vectorstore(doc_id)
+            docs = vs.similarity_search(question, k=6)
+            context = "\n\n".join([f"Page {d.metadata.get('page', 'N/A')}: {d.page_content}" for d in docs[:4]])
+
+        # Generate suggestions and citations
+        suggestions = []
+        citations = []
+        most_referenced_page = None
+        if docs:
+            for i, d in enumerate(docs[:3]):
+                if isinstance(d, dict):
+                    page = d.get('page', 'N/A')
+                    text = d.get('text', '')
+                else:
+                    page = getattr(d, 'metadata', {}).get('page', 'N/A') if hasattr(d, 'metadata') else 'N/A'
+                    text = getattr(d, 'page_content', '')
+                suggestions.append({
+                    "title": f"Page {page} Content",
+                    "page": page,
+                    "description": f"Additional information available on page {page}."
+                })
+                citations.append({
+                    "id": i + 1,
+                    "page": page,
+                    "text": text,
+                    "relevance_score": 1.0,
+                    "doc_id": doc_id
+                })
+            most_referenced_page = citations[0]["page"] if citations else None
+
+        # Use LLM to generate a response based on the context
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+        prompt = f"""Based on the following context from the document, answer the user's question and provide related topic suggestions with page numbers.
+
+Context:
+{context}
+
+User question: {question}
+
+Provide a helpful and accurate answer. Include suggestions and cite relevant pages."""
+        rag_response = llm.invoke(prompt)
+
         response_data = {
-            "answer": result["answer"],
-            "suggestions": result["suggestions"],
-            "citations": result["citations"],
-            "most_referenced_page": result["most_referenced_page"],
+            "answer": rag_response.content,
+            "suggestions": suggestions,
+            "citations": citations,
+            "most_referenced_page": most_referenced_page,
             "source_info": {
-                "has_document_content": result["has_document_content"],
-                "has_web_content": result["has_web_content"]
+                "has_document_content": bool(docs),
+                "has_web_content": False
             }
+        }
+        return json.dumps(response_data)
+        for page_num in relevant_pages[:3]:  # Max 3 suggestions
+            suggestions.append({
+                "title": f"Page {page_num} Content",
+                "page": page_num,
+                "description": f"Additional information available on page {page_num}."
+            })
+        
+        response_data = {
+            "answer": response_text,
+            "suggestions": suggestions,
+            "citations": citations,
+            "most_referenced_page": most_referenced_page
         }
         
         return json.dumps(response_data)
         
     except Exception as e:
-        print(f"DEBUG: Error in hybrid RAG with suggestions: {e}")
-        # Provide a comprehensive fallback response even on error
+        print(f"DEBUG: Error in document RAG with suggestions: {e}")
+        # Provide a simple fallback response
         fallback_response = {
-            "answer": f"I understand you're asking about: {question}. This is an important and interesting topic that involves multiple considerations and factors. Based on general knowledge and best practices, I can provide comprehensive insights. Let me address the key aspects: Understanding the context and requirements is crucial for a complete answer. Various factors need to be considered including technical specifications, practical considerations, regulatory requirements, and current best practices. For the most accurate and up-to-date information, I recommend consulting current documentation, expert resources, industry standards, and specialized sources relevant to your specific situation.",
-            "suggestions": [
-                {
-                    "title": "Expert Consultation",
-                    "page": 0,
-                    "description": "Consult with domain experts for detailed analysis."
-                },
-                {
-                    "title": "Current Documentation",
-                    "page": 0, 
-                    "description": "Review latest documentation and standards."
-                },
-                {
-                    "title": "Best Practices Research",
-                    "page": 0,
-                    "description": "Research current industry best practices."
-                }
-            ],
+            "answer": f"I encountered an error while processing your question about: {question}. Please try rephrasing your question or check if the document is properly loaded.",
+            "suggestions": [],
             "citations": [],
-            "most_referenced_page": None,
-            "source_info": {
-                "has_document_content": False,
-                "has_web_content": False
-            }
+            "most_referenced_page": None
         }
         return json.dumps(fallback_response)
 
