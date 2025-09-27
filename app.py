@@ -14,6 +14,13 @@ from modules.pdf_processing import pdf_router
 from modules.projects import project_router
 from modules.api import agent_router, general_router
 
+from modules.admin.endpoints import router as admin_router
+from modules.subscription.endpoints import router as subscription_router
+from modules.storage.endpoints import router as storage_router
+from modules.feedback.endpoints import router as feedback_router
+from modules.profile.endpoints import router as profile_router
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application"""
     
@@ -42,7 +49,12 @@ def create_app() -> FastAPI:
     app.include_router(pdf_router)      # Document processing endpoints
     app.include_router(project_router)  # Project management endpoints
     app.include_router(agent_router)    # Agent workflow endpoints
-    
+     
+    app.include_router(admin_router)
+    app.include_router(subscription_router)
+    app.include_router(storage_router)
+    app.include_router(feedback_router)
+    app.include_router(profile_router)
     return app
 
 # Create the application instance

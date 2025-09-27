@@ -11,6 +11,8 @@ from fastapi import HTTPException
 
 from modules.config.settings import settings
 from modules.database import db_manager, User
+import jwt
+from datetime import datetime, timedelta
 
 class AuthService:
     """Authentication service class"""
@@ -501,6 +503,35 @@ class AuthService:
         except Exception as e:
             print(f"DEBUG: General error in continue_with_google: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Google authentication error: {str(e)}")
+    # Add these methods to your existing AuthService class
 
+
+
+    def generate_token(self, user_id: int, email: str) -> str:
+        """Generate JWT token for user"""
+        payload = {
+            "user_id": user_id,
+            "email": email,
+            "exp": datetime.utcnow() + timedelta(days=7)  # 7 days expiry
+        }
+        return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm="HS256")
+
+    def verify_token(self, token: str) -> Optional[int]:
+        """Verify JWT token and return user ID"""
+        try:
+            payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=["HS256"])
+            return payload.get("user_id")
+        except jwt.ExpiredSignatureError:
+            return None
+        except jwt.InvalidTokenError:
+            return None
+
+    def get_user_by_id(self, user_id: int) -> Optional[User]:
+        """Get user by ID"""
+        return self.db.get_user_by_id(user_id)
+
+    def update_user_profile(self, user_id: int, **kwargs) -> bool:
+        """Update user profile"""
+        return self.db.update_user_profile(user_id, **kwargs)
 # Global auth service instance
 auth_service = AuthService()

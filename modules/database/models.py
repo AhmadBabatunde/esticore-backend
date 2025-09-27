@@ -1352,6 +1352,918 @@ class DatabaseManager:
             return cur.rowcount
         finally:
             conn.close()
+    # Add these methods to your existing DatabaseManager class
 
+    def create_admin_user(self, username: str, email: str, password: str, is_super_admin: bool = False) -> int:
+        """Create a new admin user"""
+        hashed_password = hashlib.sha256(password.encode()).hexdigest()
+        
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"INSERT INTO admin_users (username, email, password, is_super_admin) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                (username, email, hashed_password, is_super_admin)
+            )
+            conn.commit()
+            
+            cur.execute(f"SELECT id FROM admin_users WHERE email = {placeholder}", (email,))
+            admin = cur.fetchone()
+            return admin[0] if admin else None
+        finally:
+            conn.close()
+
+    def verify_admin_credentials(self, email: str, password: str) -> Optional[AdminUser]:
+        """Verify admin credentials"""
+        hashed_password = hashlib.sha256(password.encode()).hexdigest()
+        
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"SELECT id, username, email, password, is_super_admin, created_at, last_login FROM admin_users WHERE email = {placeholder} AND password = {placeholder}",
+                (email, hashed_password)
+            )
+            row = cur.fetchone()
+            
+            if row:
+                return AdminUser(
+                    id=row[0],
+                    username=row[1],
+                    email=row[2],
+                    password=row[3],
+                    is_super_admin=bool(row[4]),
+                    created_at=row[5],
+                    last_login=row[6]
+                )
+            return None
+        finally:
+            conn.close()
+
+    def get_all_users(self) -> List[User]:
+        """Get all users in the system"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        
+        try:
+            cur.execute("""
+                SELECT id, firstname, lastname, email, password, google_id, is_verified, 
+                    verification_token, verification_token_expires, created_at 
+                FROM userdata 
+                ORDER BY created_at DESC
+            """)
+            rows = cur.fetchall()
+            
+            return [
+                User(
+                    id=row[0],
+                    firstname=row[1],
+                    lastname=row[2],
+                    email=row[3],
+                    password=row[4],
+                    google_id=row[5],
+                    is_verified=bool(row[6]) if row[6] is not None else False,
+                    verification_token=row[7],
+                    verification_token_expires=row[8],
+                    created_at=row[9]
+                )
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    def delete_user(self, user_id: int) -> bool:
+        """Delete a user and all their data"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            # Delete user (cascades to related tables due to foreign keys)
+            cur.execute(f"DELETE FROM userdata WHERE id = {placeholder}", (user_id,))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def update_user_status(self, user_id: int, is_active: bool) -> bool:
+        """Update user active status"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"UPDATE userdata SET is_active = {placeholder} WHERE id = {placeholder}",
+                (is_active, user_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    # Add similar methods for subscription plans, feedback, storage, etc.
+    # Add these methods to your existing DatabaseManager class
+
+    # Admin methods
+    def get_admin_by_email(self, email: str) -> Optional[AdminUser]:
+        """Get admin by email"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"SELECT id, username, email, password, is_super_admin, created_at, last_login FROM admin_users WHERE email = {placeholder}",
+                (email,)
+            )
+            row = cur.fetchone()
+            
+            if row:
+                return AdminUser(
+                    id=row[0],
+                    username=row[1],
+                    email=row[2],
+                    password=row[3],
+                    is_super_admin=bool(row[4]),
+                    created_at=row[5],
+                    last_login=row[6]
+                )
+            return None
+        finally:
+            conn.close()
+
+    def update_admin_last_login(self, admin_id: int):
+        """Update admin last login timestamp"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            if self.use_rds:
+                cur.execute(f"UPDATE admin_users SET last_login = CURRENT_TIMESTAMP WHERE id = {placeholder}", (admin_id,))
+            else:
+                cur.execute(f"UPDATE admin_users SET last_login = datetime('now') WHERE id = {placeholder}", (admin_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_super_admins(self) -> List[AdminUser]:
+        """Get all super admins"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        
+        try:
+            cur.execute("SELECT id, username, email, password, is_super_admin, created_at, last_login FROM admin_users WHERE is_super_admin = TRUE")
+            rows = cur.fetchall()
+            
+            return [
+                AdminUser(
+                    id=row[0],
+                    username=row[1],
+                    email=row[2],
+                    password=row[3],
+                    is_super_admin=bool(row[4]),
+                    created_at=row[5],
+                    last_login=row[6]
+                )
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    # Subscription plan methods
+    def create_subscription_plan(self, name: str, description: str, price_monthly: float, price_annual: float,
+                            storage_gb: int, project_limit: int, user_limit: int, action_limit: int,
+                            features: List[str], has_free_trial: bool, trial_days: int) -> int:
+        """Create a new subscription plan"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            # Convert features list to JSON
+            features_json = json.dumps(features) if features else "[]"
+            
+            cur.execute(
+                f"INSERT INTO subscription_plans (name, description, price_monthly, price_annual, storage_gb, project_limit, user_limit, action_limit, features, has_free_trial, trial_days) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                (name, description, price_monthly, price_annual, storage_gb, project_limit, user_limit, action_limit, features_json, has_free_trial, trial_days)
+            )
+            conn.commit()
+            
+            cur.execute(f"SELECT id FROM subscription_plans WHERE name = {placeholder}", (name,))
+            plan = cur.fetchone()
+            return plan[0] if plan else None
+        finally:
+            conn.close()
+
+    def get_all_subscription_plans(self) -> List[SubscriptionPlan]:
+        """Get all subscription plans"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        
+        try:
+            cur.execute("SELECT id, name, description, price_monthly, price_annual, storage_gb, project_limit, user_limit, action_limit, features, is_active, has_free_trial, trial_days, created_at FROM subscription_plans ORDER BY price_monthly ASC")
+            rows = cur.fetchall()
+            
+            plans = []
+            for row in rows:
+                # Parse features from JSON
+                features = []
+                if row[9]:
+                    try:
+                        features = json.loads(row[9])
+                    except json.JSONDecodeError:
+                        features = []
+                
+                plans.append(SubscriptionPlan(
+                    id=row[0],
+                    name=row[1],
+                    description=row[2],
+                    price_monthly=float(row[3]) if row[3] else 0.0,
+                    price_annual=float(row[4]) if row[4] else 0.0,
+                    storage_gb=row[5],
+                    project_limit=row[6],
+                    user_limit=row[7],
+                    action_limit=row[8],
+                    features=features,
+                    is_active=bool(row[10]),
+                    has_free_trial=bool(row[11]),
+                    trial_days=row[12],
+                    created_at=row[13]
+                ))
+            return plans
+        finally:
+            conn.close()
+
+    def get_subscription_plan_by_id(self, plan_id: int) -> Optional[SubscriptionPlan]:
+        """Get subscription plan by ID"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute("SELECT id, name, description, price_monthly, price_annual, storage_gb, project_limit, user_limit, action_limit, features, is_active, has_free_trial, trial_days, created_at FROM subscription_plans WHERE id = ?", (plan_id,))
+            row = cur.fetchone()
+            
+            if row:
+                # Parse features from JSON
+                features = []
+                if row[9]:
+                    try:
+                        features = json.loads(row[9])
+                    except json.JSONDecodeError:
+                        features = []
+                
+                return SubscriptionPlan(
+                    id=row[0],
+                    name=row[1],
+                    description=row[2],
+                    price_monthly=float(row[3]) if row[3] else 0.0,
+                    price_annual=float(row[4]) if row[4] else 0.0,
+                    storage_gb=row[5],
+                    project_limit=row[6],
+                    user_limit=row[7],
+                    action_limit=row[8],
+                    features=features,
+                    is_active=bool(row[10]),
+                    has_free_trial=bool(row[11]),
+                    trial_days=row[12],
+                    created_at=row[13]
+                )
+            return None
+        finally:
+            conn.close()
+
+    def update_subscription_plan(self, plan_id: int, name: str = None, description: str = None,
+                            price_monthly: float = None, price_annual: float = None,
+                            storage_gb: int = None, project_limit: int = None,
+                            user_limit: int = None, action_limit: int = None,
+                            features: List[str] = None, is_active: bool = None) -> bool:
+        """Update subscription plan"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            update_fields = []
+            params = []
+            
+            if name is not None:
+                update_fields.append("name = ?")
+                params.append(name)
+            if description is not None:
+                update_fields.append("description = ?")
+                params.append(description)
+            if price_monthly is not None:
+                update_fields.append("price_monthly = ?")
+                params.append(price_monthly)
+            if price_annual is not None:
+                update_fields.append("price_annual = ?")
+                params.append(price_annual)
+            if storage_gb is not None:
+                update_fields.append("storage_gb = ?")
+                params.append(storage_gb)
+            if project_limit is not None:
+                update_fields.append("project_limit = ?")
+                params.append(project_limit)
+            if user_limit is not None:
+                update_fields.append("user_limit = ?")
+                params.append(user_limit)
+            if action_limit is not None:
+                update_fields.append("action_limit = ?")
+                params.append(action_limit)
+            if features is not None:
+                features_json = json.dumps(features)
+                update_fields.append("features = ?")
+                params.append(features_json)
+            if is_active is not None:
+                update_fields.append("is_active = ?")
+                params.append(is_active)
+            
+            if not update_fields:
+                return False
+            
+            if self.use_rds:
+                update_fields.append("updated_at = CURRENT_TIMESTAMP")
+            else:
+                update_fields.append("updated_at = datetime('now')")
+            
+            params.append(plan_id)
+            
+            query = f"UPDATE subscription_plans SET {', '.join(update_fields)} WHERE id = ?"
+            cur.execute(query, params)
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def delete_subscription_plan(self, plan_id: int) -> bool:
+        """Delete subscription plan"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(f"DELETE FROM subscription_plans WHERE id = {placeholder}", (plan_id,))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    # User storage methods
+    def create_user_storage(self, user_id: int) -> bool:
+        """Create user storage record"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"INSERT INTO user_storage (user_id, used_storage_mb) VALUES ({placeholder}, 0)",
+                (user_id,)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception as e:
+            # Handle duplicate key error
+            if "Duplicate" in str(e) or "UNIQUE constraint" in str(e):
+                return False
+            raise
+        finally:
+            conn.close()
+
+    def get_user_storage(self, user_id: int) -> Optional[UserStorage]:
+        """Get user storage"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"SELECT id, user_id, used_storage_mb, last_updated FROM user_storage WHERE user_id = {placeholder}",
+                (user_id,)
+            )
+            row = cur.fetchone()
+            
+            if row:
+                return UserStorage(
+                    id=row[0],
+                    user_id=row[1],
+                    used_storage_mb=row[2],
+                    last_updated=row[3]
+                )
+            return None
+        finally:
+            conn.close()
+
+    def update_user_storage(self, user_id: int, used_storage_mb: int) -> bool:
+        """Update user storage"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            if self.use_rds:
+                cur.execute(
+                    f"UPDATE user_storage SET used_storage_mb = {placeholder}, last_updated = CURRENT_TIMESTAMP WHERE user_id = {placeholder}",
+                    (used_storage_mb, user_id)
+                )
+            else:
+                cur.execute(
+                    f"UPDATE user_storage SET used_storage_mb = {placeholder}, last_updated = datetime('now') WHERE user_id = {placeholder}",
+                    (used_storage_mb, user_id)
+                )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    # Feedback methods
+    def create_feedback(self, user_id: int, email: str, ai_response: str, rating: str, project_name: str = None) -> int:
+        """Create feedback record"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"INSERT INTO feedback (user_id, email, ai_response, rating, project_name) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                (user_id, email, ai_response, rating, project_name)
+            )
+            conn.commit()
+            
+            cur.execute(f"SELECT id FROM feedback WHERE user_id = {placeholder} ORDER BY created_at DESC LIMIT 1", (user_id,))
+            feedback = cur.fetchone()
+            return feedback[0] if feedback else None
+        finally:
+            conn.close()
+
+    def get_all_feedback(self, page: int = 1, limit: int = 20, rating: str = None) -> List[Feedback]:
+        """Get all feedback with pagination"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            offset = (page - 1) * limit
+            query = "SELECT id, user_id, email, ai_response, rating, project_name, created_at FROM feedback"
+            params = []
+            
+            if rating:
+                query += f" WHERE rating = {placeholder}"
+                params.append(rating)
+            
+            query += f" ORDER BY created_at DESC LIMIT {placeholder} OFFSET {placeholder}"
+            params.extend([limit, offset])
+            
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            
+            return [
+                Feedback(
+                    id=row[0],
+                    user_id=row[1],
+                    email=row[2],
+                    ai_response=row[3],
+                    rating=row[4],
+                    project_name=row[5],
+                    created_at=row[6]
+                )
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    def get_feedback_statistics(self) -> Dict[str, int]:
+        """Get feedback statistics"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        
+        try:
+            cur.execute("SELECT rating, COUNT(*) FROM feedback GROUP BY rating")
+            rows = cur.fetchall()
+            
+            stats = {'total': 0, 'positive': 0, 'negative': 0}
+            for row in rows:
+                stats[row[0]] = row[1]
+                stats['total'] += row[1]
+            
+            return stats
+        finally:
+            conn.close()
+
+    # AI model methods
+    def create_ai_model(self, name: str, provider: str, model_name: str, config: Dict[str, Any], is_active: bool = False) -> int:
+        """Create AI model record"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            config_json = json.dumps(config) if config else "{}"
+            
+            cur.execute(
+                f"INSERT INTO ai_models (name, provider, model_name, is_active, config) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                (name, provider, model_name, is_active, config_json)
+            )
+            conn.commit()
+            
+            cur.execute(f"SELECT id FROM ai_models WHERE name = {placeholder}", (name,))
+            model = cur.fetchone()
+            return model[0] if model else None
+        finally:
+            conn.close()
+
+    def get_all_ai_models(self) -> List[AIModel]:
+        """Get all AI models"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        
+        try:
+            cur.execute("SELECT id, name, provider, model_name, is_active, config, created_at FROM ai_models ORDER BY created_at DESC")
+            rows = cur.fetchall()
+            
+            models = []
+            for row in rows:
+                # Parse config from JSON
+                config = {}
+                if row[5]:
+                    try:
+                        config = json.loads(row[5])
+                    except json.JSONDecodeError:
+                        config = {}
+                
+                models.append(AIModel(
+                    id=row[0],
+                    name=row[1],
+                    provider=row[2],
+                    model_name=row[3],
+                    is_active=bool(row[4]),
+                    config=config,
+                    created_at=row[6]
+                ))
+            return models
+        finally:
+            conn.close()
+
+    def activate_ai_model(self, model_id: int) -> bool:
+        """Activate an AI model and deactivate others"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            # First deactivate all models
+            cur.execute(f"UPDATE ai_models SET is_active = FALSE")
+            
+            # Activate the specified model
+            cur.execute(f"UPDATE ai_models SET is_active = TRUE WHERE id = {placeholder}", (model_id,))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def get_active_ai_model(self) -> Optional[AIModel]:
+        """Get the active AI model"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        
+        try:
+            cur.execute("SELECT id, name, provider, model_name, is_active, config, created_at FROM ai_models WHERE is_active = TRUE LIMIT 1")
+            row = cur.fetchone()
+            
+            if row:
+                # Parse config from JSON
+                config = {}
+                if row[5]:
+                    try:
+                        config = json.loads(row[5])
+                    except json.JSONDecodeError:
+                        config = {}
+                
+                return AIModel(
+                    id=row[0],
+                    name=row[1],
+                    provider=row[2],
+                    model_name=row[3],
+                    is_active=bool(row[4]),
+                    config=config,
+                    created_at=row[6]
+                )
+            return None
+        finally:
+            conn.close()
+
+    # Recently viewed projects methods
+    def add_recently_viewed_project(self, user_id: int, project_id: str) -> bool:
+        """Add or update recently viewed project"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            # Try to update existing record
+            if self.use_rds:
+                cur.execute(f"""
+                    INSERT INTO recently_viewed_projects (user_id, project_id, view_count) 
+                    VALUES ({placeholder}, {placeholder}, 1)
+                    ON DUPLICATE KEY UPDATE view_count = view_count + 1, viewed_at = CURRENT_TIMESTAMP
+                """, (user_id, project_id))
+            else:
+                cur.execute(f"""
+                    INSERT OR REPLACE INTO recently_viewed_projects (user_id, project_id, view_count, viewed_at) 
+                    VALUES ({placeholder}, {placeholder}, 
+                    COALESCE((SELECT view_count FROM recently_viewed_projects WHERE user_id = {placeholder} AND project_id = {placeholder}), 0) + 1,
+                    CURRENT_TIMESTAMP)
+                """, (user_id, project_id, user_id, project_id))
+            
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def get_recently_viewed_projects(self, user_id: int, limit: int = 10) -> List[RecentlyViewedProject]:
+        """Get user's recently viewed projects"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(f"""
+                SELECT rvp.id, rvp.user_id, rvp.project_id, rvp.viewed_at, rvp.view_count, p.name as project_name
+                FROM recently_viewed_projects rvp
+                JOIN projects p ON rvp.project_id = p.project_id
+                WHERE rvp.user_id = {placeholder}
+                ORDER BY rvp.viewed_at DESC
+                LIMIT {placeholder}
+            """, (user_id, limit))
+            
+            rows = cur.fetchall()
+            
+            return [
+                RecentlyViewedProject(
+                    id=row[0],
+                    user_id=row[1],
+                    project_id=row[2],
+                    viewed_at=row[3],
+                    view_count=row[4],
+                    project_name=row[5] if len(row) > 5 else ""
+                )
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    # User subscription methods
+    def create_user_subscription(self, user_id: int, plan_id: int, stripe_subscription_id: str = None,
+                            stripe_customer_id: str = None, interval: str = "monthly") -> int:
+        """Create user subscription"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(f"""
+                INSERT INTO user_subscriptions (user_id, plan_id, stripe_subscription_id, stripe_customer_id, interval) 
+                VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
+            """, (user_id, plan_id, stripe_subscription_id, stripe_customer_id, interval))
+            conn.commit()
+            
+            cur.execute(f"SELECT id FROM user_subscriptions WHERE user_id = {placeholder} ORDER BY created_at DESC LIMIT 1", (user_id,))
+            subscription = cur.fetchone()
+            return subscription[0] if subscription else None
+        finally:
+            conn.close()
+
+    def get_user_subscription(self, user_id: int) -> Optional[UserSubscription]:
+        """Get user's active subscription"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(f"""
+                SELECT us.id, us.user_id, us.plan_id, us.stripe_subscription_id, us.stripe_customer_id,
+                    us.current_period_start, us.current_period_end, us.status, us.interval, 
+                    us.auto_renew, us.is_active, us.created_at, us.updated_at,
+                    sp.name, sp.description, sp.storage_gb, sp.project_limit, sp.action_limit
+                FROM user_subscriptions us
+                JOIN subscription_plans sp ON us.plan_id = sp.id
+                WHERE us.user_id = {placeholder} AND us.is_active = TRUE
+                ORDER BY us.created_at DESC
+                LIMIT 1
+            """, (user_id,))
+            
+            row = cur.fetchone()
+            if row:
+                # This would return a combined object with subscription and plan info
+                # You might want to adjust this based on your needs
+                return UserSubscription(
+                    id=row[0],
+                    user_id=row[1],
+                    plan_id=row[2],
+                    stripe_subscription_id=row[3],
+                    stripe_customer_id=row[4],
+                    current_period_start=row[5],
+                    current_period_end=row[6],
+                    status=row[7],
+                    interval=row[8],
+                    auto_renew=bool(row[9]),
+                    is_active=bool(row[10]),
+                    created_at=row[11],
+                    updated_at=row[12]
+                )
+            return None
+        finally:
+            conn.close()
+
+    def update_user_subscription(self, subscription_id: int, **kwargs) -> bool:
+        """Update user subscription"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            update_fields = []
+            params = []
+            
+            for key, value in kwargs.items():
+                if value is not None:
+                    update_fields.append(f"{key} = ?")
+                    params.append(value)
+            
+            if not update_fields:
+                return False
+            
+            if self.use_rds:
+                update_fields.append("updated_at = CURRENT_TIMESTAMP")
+            else:
+                update_fields.append("updated_at = datetime('now')")
+            
+            params.append(subscription_id)
+            
+            query = f"UPDATE user_subscriptions SET {', '.join(update_fields)} WHERE id = ?"
+            cur.execute(query, params)
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    # Dashboard statistics methods
+    def get_total_users_count(self, status: str = None, search: str = None) -> int:
+        """Get total users count with optional filtering"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            query = "SELECT COUNT(*) FROM userdata WHERE 1=1"
+            params = []
+            
+            if status:
+                query += f" AND is_active = {placeholder}"
+                params.append(status == "active")
+            
+            if search:
+                query += f" AND (email LIKE {placeholder} OR firstname LIKE {placeholder} OR lastname LIKE {placeholder})"
+                search_term = f"%{search}%"
+                params.extend([search_term, search_term, search_term])
+            
+            cur.execute(query, params)
+            return cur.fetchone()[0]
+        finally:
+            conn.close()
+
+    def get_active_users_count(self) -> int:
+        """Get count of active users"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        
+        try:
+            cur.execute("SELECT COUNT(*) FROM userdata WHERE is_active = TRUE")
+            return cur.fetchone()[0]
+        finally:
+            conn.close()
+
+    def get_total_feedback_count(self) -> int:
+        """Get total feedback count"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        
+        try:
+            cur.execute("SELECT COUNT(*) FROM feedback")
+            return cur.fetchone()[0]
+        finally:
+            conn.close()
+
+    def get_recent_signups(self, days: int = 7) -> int:
+        """Get recent signups count"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            if self.use_rds:
+                cur.execute(f"SELECT COUNT(*) FROM userdata WHERE created_at >= DATE_SUB(NOW(), INTERVAL {placeholder} DAY)", (days,))
+            else:
+                cur.execute(f"SELECT COUNT(*) FROM userdata WHERE created_at >= datetime('now', '-{placeholder} days')", (days,))
+            return cur.fetchone()[0]
+        finally:
+            conn.close()
+
+    def get_total_storage_usage(self) -> int:
+        """Get total storage usage in MB"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        
+        try:
+            cur.execute("SELECT SUM(used_storage_mb) FROM user_storage")
+            result = cur.fetchone()[0]
+            return result if result else 0
+        finally:
+            conn.close()
+
+    def get_subscriptions_expiring_soon(self, days: int) -> List[Dict]:
+        """Get subscriptions expiring soon"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            if self.use_rds:
+                cur.execute(f"""
+                    SELECT us.id, u.email, sp.name, us.current_period_end 
+                    FROM user_subscriptions us
+                    JOIN userdata u ON us.user_id = u.id
+                    JOIN subscription_plans sp ON us.plan_id = sp.id
+                    WHERE us.is_active = TRUE 
+                    AND us.current_period_end BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL {placeholder} DAY)
+                """, (days,))
+            else:
+                cur.execute(f"""
+                    SELECT us.id, u.email, sp.name, us.current_period_end 
+                    FROM user_subscriptions us
+                    JOIN userdata u ON us.user_id = u.id
+                    JOIN subscription_plans sp ON us.plan_id = sp.id
+                    WHERE us.is_active = TRUE 
+                    AND us.current_period_end BETWEEN datetime('now') AND datetime('now', '+{placeholder} days')
+                """, (days,))
+            
+            rows = cur.fetchall()
+            return [
+                {
+                    "subscription_id": row[0],
+                    "user_email": row[1],
+                    "plan_name": row[2],
+                    "expiry_date": row[3]
+                }
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    def get_recently_expired_subscriptions(self, days: int) -> List[Dict]:
+        """Get recently expired subscriptions"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            if self.use_rds:
+                cur.execute(f"""
+                    SELECT us.id, u.email, sp.name, us.current_period_end 
+                    FROM user_subscriptions us
+                    JOIN userdata u ON us.user_id = u.id
+                    JOIN subscription_plans sp ON us.plan_id = sp.id
+                    WHERE us.is_active = TRUE 
+                    AND us.current_period_end BETWEEN DATE_SUB(NOW(), INTERVAL {placeholder} DAY) AND NOW()
+                """, (days,))
+            else:
+                cur.execute(f"""
+                    SELECT us.id, u.email, sp.name, us.current_period_end 
+                    FROM user_subscriptions us
+                    JOIN userdata u ON us.user_id = u.id
+                    JOIN subscription_plans sp ON us.plan_id = sp.id
+                    WHERE us.is_active = TRUE 
+                    AND us.current_period_end BETWEEN datetime('now', '-{placeholder} days') AND datetime('now')
+                """, (days,))
+            
+            rows = cur.fetchall()
+            return [
+                {
+                    "subscription_id": row[0],
+                    "user_email": row[1],
+                    "plan_name": row[2],
+                    "expiry_date": row[3]
+                }
+                for row in rows
+            ]
+        finally:
+            conn.close()
 # Global database manager instance
 db_manager = DatabaseManager()
