@@ -1253,7 +1253,7 @@ def save_annotated_image_as_pdf_page(image_path: str, original_pdf_path: str, pa
 
         # Verify the output file was created
         if os.path.exists(output_pdf_path):
-            return f"SUCCESS: Annotated PDF saved successfully to '{output_pdf_path}'. File size: {os.path.getsize(output_pdf_path)} bytes."
+            return f"SUCCESS: Annotated PDF saved successfully to '{output_pdf_path}'. If you need any further assistance or additional annotations, feel free to ask!"
         else:
             return f"Error: Failed to create output PDF at '{output_pdf_path}'."
 
