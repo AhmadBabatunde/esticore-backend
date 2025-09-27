@@ -201,7 +201,7 @@ class ContextResolver:
                     'name': doc_info['filename'],
                     'pages': doc_info['pages'],
                     'status': doc_info['status'],
-                    'pdf_path': doc_info['pdf_path']
+                    'storage_type': doc_info.get('storage_type', 'filesystem')
                 }
             except Exception as e:
                 print(f"Error getting document metadata: {e}")

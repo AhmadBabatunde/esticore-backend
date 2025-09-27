@@ -62,7 +62,23 @@ async def unified_agent(
     except FileNotFoundError:
         raise HTTPException(404, detail="Document not found")
     
-    pdf_path = doc_info["pdf_path"]
+    # Handle different storage types
+    if doc_info.get("storage_type") == "database":
+        # For database storage, we need to get the PDF content from the database
+        try:
+            pdf_content = pdf_processor.get_document_content(doc_id)
+            # Create a temporary file for processing
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_file:
+                temp_file.write(pdf_content)
+                pdf_path = temp_file.name
+        except Exception as e:
+            raise HTTPException(500, detail=f"Failed to retrieve document content: {str(e)}")
+    else:
+        # For legacy file storage
+        pdf_path = doc_info.get("pdf_path")
+        if not pdf_path:
+            raise HTTPException(404, detail="Document file path not found")
     
     # Extract page number from instruction or default to 1
     page_number = 1
@@ -95,10 +111,15 @@ async def unified_agent(
     
     # Generate unique output path for potential annotations
     output_filename = f"{doc_id}_page_{page_number}_{uuid.uuid4().hex[:8]}_unified.pdf"
-    output_pdf_path = os.path.join(settings.OUTPUT_DIR, output_filename)
     
-    # Ensure output directory exists
-    os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
+    # Handle case where OUTPUT_DIR is None (database storage)
+    if settings.OUTPUT_DIR is None:
+        import tempfile
+        output_pdf_path = os.path.join(tempfile.gettempdir(), output_filename)
+    else:
+        output_pdf_path = os.path.join(settings.OUTPUT_DIR, output_filename)
+        # Ensure output directory exists
+        os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
     
     # Get recent chat context
     chat_history = agent_workflow.get_chat_history(session_id, user_id, limit=10)
@@ -165,14 +186,44 @@ Please proceed with the most efficient approach for the user's request.
         session_manager.add_message_to_session(session_id, user_id, "assistant", final_msg)
         
         # Check if annotation was performed (PDF file created)
+        output_id = None
         if os.path.exists(output_pdf_path):
             print(f"DEBUG: Annotation completed. PDF file created at: {output_pdf_path}")
             
-            # Add cleanup task
-            background_tasks.add_task(delete_file_after_delay, output_pdf_path, settings.CHAT_FILE_DELETE_DELAY)
+            # If using database storage, move the file to database
+            if pdf_processor.use_database_storage:
+                try:
+                    # Read the generated file
+                    with open(output_pdf_path, 'rb') as f:
+                        output_data = f.read()
+                    
+                    # Store in database
+                    output_id = pdf_processor.store_generated_output(
+                        output_data=output_data,
+                        filename=output_filename,
+                        source_doc_id=doc_id,
+                        user_id=user_id,
+                        metadata={
+                            "type": "unified_annotation",
+                            "page_number": page_number,
+                            "session_id": session_id
+                        }
+                    )
+                    
+                    # Remove local file
+                    os.remove(output_pdf_path)
+                    print(f"DEBUG: Moved annotation to database with output_id: {output_id}")
+                    
+                except Exception as e:
+                    print(f"DEBUG: Error moving annotation to database: {e}")
+                    # Fall back to file cleanup
+                    background_tasks.add_task(delete_file_after_delay, output_pdf_path, settings.CHAT_FILE_DELETE_DELAY)
+            else:
+                # Add cleanup task for file storage
+                background_tasks.add_task(delete_file_after_delay, output_pdf_path, settings.CHAT_FILE_DELETE_DELAY)
             
-            # Return JSON response with annotation details and tracking ID
-            return JSONResponse(content={
+            # Return JSON response with annotation details
+            response_data = {
                 "response": final_msg,
                 "session_id": session_id,
                 "doc_id": doc_id,
@@ -180,9 +231,17 @@ Please proceed with the most efficient approach for the user's request.
                 "type": "annotation",
                 "annotation_status": "completed",
                 "annotated_file_id": output_filename,
-                "annotated_file_path": output_pdf_path,
                 "message": "Annotation completed successfully"
-            })
+            }
+            
+            # Add appropriate file reference
+            if output_id:
+                response_data["output_id"] = output_id
+                response_data["download_url"] = f"/download/output/{output_id}"
+            else:
+                response_data["annotated_file_path"] = output_pdf_path
+            
+            return JSONResponse(content=response_data)
         else:
             print(f"DEBUG: No annotation file created. Returning information response.")
             
@@ -294,6 +353,15 @@ Please proceed with the most efficient approach for the user's request.
             },
             status_code=500
         )
+    finally:
+        # Clean up temporary PDF file if it was created for database storage
+        if doc_info.get("storage_type") == "database" and 'pdf_path' in locals():
+            try:
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+                    print(f"DEBUG: Cleaned up temporary PDF file: {pdf_path}")
+            except Exception as e:
+                print(f"DEBUG: Error cleaning up temporary PDF file: {e}")
 
 @router.get("/chat/history")
 async def get_chat_history(user_id: int, session_id: str = None, limit: int = 50):
@@ -387,7 +455,23 @@ async def unified_agent_for_project(
     except FileNotFoundError:
         raise HTTPException(404, detail="Document not found")
     
-    pdf_path = doc_info["pdf_path"]
+    # Handle different storage types
+    if doc_info.get("storage_type") == "database":
+        # For database storage, we need to get the PDF content from the database
+        try:
+            pdf_content = pdf_processor.get_document_content(final_doc_id)
+            # Create a temporary file for processing
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_file:
+                temp_file.write(pdf_content)
+                pdf_path = temp_file.name
+        except Exception as e:
+            raise HTTPException(500, detail=f"Failed to retrieve document content: {str(e)}")
+    else:
+        # For legacy file storage
+        pdf_path = doc_info.get("pdf_path")
+        if not pdf_path:
+            raise HTTPException(404, detail="Document file path not found")
     
     # Extract page number from instruction or default to 1
     page_number = 1
@@ -420,10 +504,15 @@ async def unified_agent_for_project(
     
     # Generate unique output path for potential annotations
     output_filename = f"{project_id}_{final_doc_id}_page_{page_number}_{uuid.uuid4().hex[:8]}_project.pdf"
-    output_pdf_path = os.path.join(settings.OUTPUT_DIR, output_filename)
     
-    # Ensure output directory exists
-    os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
+    # Handle case where OUTPUT_DIR is None (database storage)
+    if settings.OUTPUT_DIR is None:
+        import tempfile
+        output_pdf_path = os.path.join(tempfile.gettempdir(), output_filename)
+    else:
+        output_pdf_path = os.path.join(settings.OUTPUT_DIR, output_filename)
+        # Ensure output directory exists
+        os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
     
     # Get recent chat context
     chat_history = agent_workflow.get_chat_history(session_id, user_id, limit=10)
@@ -488,14 +577,45 @@ Please proceed based on the user's intent.
         session_manager.add_message_to_session(session_id, user_id, "assistant", final_msg)
         
         # Check if annotation was performed (PDF file created)
+        output_id = None
         if os.path.exists(output_pdf_path):
             print(f"DEBUG: Annotation completed. PDF file created at: {output_pdf_path}")
             
-            # Add cleanup task
-            background_tasks.add_task(delete_file_after_delay, output_pdf_path, settings.CHAT_FILE_DELETE_DELAY)
+            # If using database storage, move the file to database
+            if pdf_processor.use_database_storage:
+                try:
+                    # Read the generated file
+                    with open(output_pdf_path, 'rb') as f:
+                        output_data = f.read()
+                    
+                    # Store in database
+                    output_id = pdf_processor.store_generated_output(
+                        output_data=output_data,
+                        filename=output_filename,
+                        source_doc_id=final_doc_id,
+                        user_id=user_id,
+                        metadata={
+                            "type": "project_annotation",
+                            "page_number": page_number,
+                            "project_id": project_id,
+                            "session_id": session_id
+                        }
+                    )
+                    
+                    # Remove local file
+                    os.remove(output_pdf_path)
+                    print(f"DEBUG: Moved project annotation to database with output_id: {output_id}")
+                    
+                except Exception as e:
+                    print(f"DEBUG: Error moving project annotation to database: {e}")
+                    # Fall back to file cleanup
+                    background_tasks.add_task(delete_file_after_delay, output_pdf_path, settings.CHAT_FILE_DELETE_DELAY)
+            else:
+                # Add cleanup task for file storage
+                background_tasks.add_task(delete_file_after_delay, output_pdf_path, settings.CHAT_FILE_DELETE_DELAY)
             
-            # Return JSON response with annotation details and tracking ID
-            return JSONResponse(content={
+            # Return JSON response with annotation details
+            response_data = {
                 "response": final_msg,
                 "session_id": session_id,
                 "project_id": project_id,
@@ -504,9 +624,17 @@ Please proceed based on the user's intent.
                 "type": "annotation",
                 "annotation_status": "completed",
                 "annotated_file_id": output_filename,
-                "annotated_file_path": output_pdf_path,
                 "message": "Annotation completed successfully"
-            })
+            }
+            
+            # Add appropriate file reference
+            if output_id:
+                response_data["output_id"] = output_id
+                response_data["download_url"] = f"/download/output/{output_id}"
+            else:
+                response_data["annotated_file_path"] = output_pdf_path
+            
+            return JSONResponse(content=response_data)
         else:
             print(f"DEBUG: No annotation file created. Returning information response.")
             
@@ -623,4 +751,13 @@ Please proceed based on the user's intent.
             },
             status_code=500
         )
+    finally:
+        # Clean up temporary PDF file if it was created for database storage
+        if doc_info.get("storage_type") == "database" and 'pdf_path' in locals():
+            try:
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+                    print(f"DEBUG: Cleaned up temporary PDF file: {pdf_path}")
+            except Exception as e:
+                print(f"DEBUG: Error cleaning up temporary PDF file: {e}")
 
