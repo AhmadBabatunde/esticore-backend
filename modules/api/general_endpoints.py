@@ -3,12 +3,14 @@ General API endpoints for the Floor Plan Agent API
 """
 import os
 import io
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse, StreamingResponse, Response
 from modules.config.settings import settings
 from modules.config.utils import validate_file_path
 from modules.pdf_processing.service import pdf_processor  # Import pdf_processor
 from modules.database.models import db_manager
+from modules.database.optimized_service import optimized_document_service
+from modules.cache.document_cache import document_cache_manager
 
 router = APIRouter(tags=["general"])
 
@@ -159,6 +161,170 @@ async def download_pdf(user_id: int, doc_id: str):
     except Exception as e:
         print(f"DEBUG: Error in download_pdf: {e}")
         raise HTTPException(500, detail="Internal server error")
+
+
+@router.get("/download/pdf")
+async def download_pdf_optimized(user_id: int, doc_id: str, request: Request):
+    """
+    Optimized PDF download with caching and streaming (GET method)
+    
+    Args:
+        user_id: User identifier for access control
+        doc_id: Document identifier
+        request: FastAPI request object for conditional requests
+    
+    Returns:
+        StreamingResponse with PDF content and optimized headers
+    """
+    try:
+        # Validate parameters
+        if not doc_id or not user_id:
+            raise HTTPException(400, detail="doc_id and user_id are required")
+        
+        # Check cache for metadata first
+        metadata = await document_cache_manager.get_document_metadata(doc_id)
+        
+        if metadata:
+            # Validate user access from cached metadata
+            if metadata.user_id != user_id:
+                raise HTTPException(403, detail="Access denied")
+        else:
+            # Get metadata from database
+            metadata = await optimized_document_service.get_document_metadata_only(doc_id, user_id)
+            
+            if not metadata:
+                raise HTTPException(404, detail="Document not found")
+            
+            # Cache the metadata for future requests
+            await document_cache_manager.cache_document_metadata(doc_id, metadata)
+        
+        # Check for conditional requests (ETag)
+        if_none_match = request.headers.get("if-none-match")
+        if if_none_match and if_none_match.strip('"') == metadata.etag:
+            return Response(status_code=304)
+        
+        # Try to get content from cache
+        content = await document_cache_manager.get_document_content(doc_id)
+        
+        if content:
+            # Serve from cache
+            response_headers = {
+                "Content-Type": metadata.content_type,
+                "Content-Disposition": f'attachment; filename="{metadata.filename}"',
+                "Content-Length": str(len(content)),
+                "Cache-Control": "private, max-age=3600",
+                "ETag": f'"{metadata.etag}"',
+                "Accept-Ranges": "bytes"
+            }
+            
+            return StreamingResponse(
+                io.BytesIO(content),
+                media_type=metadata.content_type,
+                headers=response_headers
+            )
+        
+        else:
+            # Get content from database
+            doc_with_content = await optimized_document_service.get_document_with_content(doc_id, user_id)
+            
+            if not doc_with_content:
+                # Fallback to legacy file system approach
+                return await _serve_from_filesystem(doc_id, user_id, metadata)
+            
+            content = doc_with_content.content
+            
+            # Cache content if it's small enough
+            if doc_with_content.is_cacheable():
+                await document_cache_manager.cache_document_content(doc_id, content)
+            
+            # Prepare response headers
+            response_headers = {
+                "Content-Type": metadata.content_type,
+                "Content-Disposition": f'attachment; filename="{metadata.filename}"',
+                "Content-Length": str(len(content)),
+                "Cache-Control": "private, max-age=3600",
+                "ETag": f'"{metadata.etag}"',
+                "Accept-Ranges": "bytes"
+            }
+            
+            return StreamingResponse(
+                io.BytesIO(content),
+                media_type=metadata.content_type,
+                headers=response_headers
+            )
+    
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail="Internal server error")
+
+
+async def _serve_from_filesystem(doc_id: str, user_id: int, metadata):
+    """
+    Fallback method to serve PDF from filesystem (legacy storage)
+    
+    Args:
+        doc_id: Document identifier
+        user_id: User identifier
+        metadata: Document metadata
+    
+    Returns:
+        FileResponse for filesystem-based PDF
+    """
+    try:
+        # Get document info for file paths (legacy approach)
+        doc_info = pdf_processor.get_document_info(doc_id)
+        pdf_path = doc_info.get("pdf_path")
+        
+        if not pdf_path:
+            raise HTTPException(404, detail="Document file path not found")
+        
+        # Validate file path and existence
+        if not validate_file_path(pdf_path, settings.DATA_DIR) or not os.path.exists(pdf_path):
+            # Try alternative paths (same logic as original endpoint)
+            potential_paths = []
+            
+            if settings.DOCS_DIR:
+                potential_paths.append(os.path.join(settings.DOCS_DIR, f"{doc_id}.pdf"))
+            if settings.OUTPUT_DIR:
+                potential_paths.append(os.path.join(settings.OUTPUT_DIR, f"{doc_id}.pdf"))
+            
+            # Look for files that start with doc_id
+            for directory in [settings.OUTPUT_DIR, settings.DOCS_DIR]:
+                if directory and os.path.exists(directory):
+                    for filename in os.listdir(directory):
+                        if filename.startswith(doc_id) and filename.endswith('.pdf'):
+                            potential_paths.append(os.path.join(directory, filename))
+            
+            # Try each potential path
+            pdf_path = None
+            for potential_path in potential_paths:
+                if os.path.exists(potential_path) and validate_file_path(potential_path, settings.DATA_DIR):
+                    pdf_path = potential_path
+                    break
+            
+            if not pdf_path:
+                raise HTTPException(404, detail="PDF file not found")
+        
+        # Prepare response headers
+        response_headers = {
+            "Cache-Control": "private, max-age=3600",
+            "ETag": f'"{metadata.etag}"',
+            "Accept-Ranges": "bytes"
+        }
+        
+        return FileResponse(
+            pdf_path, 
+            filename=metadata.filename,
+            headers=response_headers
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail="Error serving file from filesystem")
+
 
 @router.get("/download/output/{output_id}")
 async def download_generated_output(output_id: str):

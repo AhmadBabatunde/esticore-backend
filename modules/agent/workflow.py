@@ -83,7 +83,7 @@ class FloorPlanState(MessagesState):
     page_number: int = 1
 
 class AgentWorkflow:
-    """Enhanced agent workflow management with context-aware sessions"""
+    """Enhanced agent workflow management with intelligent response strategy"""
     
     def __init__(self):
         self.memory = SimpleMemory()
@@ -91,7 +91,6 @@ class AgentWorkflow:
         self.session_manager = session_manager
         self.context_resolver = context_resolver
         
-        # Initialize agent
         self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
         self.agent = create_tool_calling_agent(self.llm, ALL_TOOLS, self._create_prompt())
         self.agent_executor = AgentExecutor(agent=self.agent, tools=ALL_TOOLS, verbose=True)
