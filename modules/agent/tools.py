@@ -5,7 +5,8 @@ import os
 import json
 import uuid
 import tempfile
-from typing import List
+import tiktoken
+from typing import List, Dict, Tuple
 from PIL import Image, ImageDraw, ImageFont
 from pdf2image import convert_from_path
 from pypdf import PdfReader, PdfWriter
@@ -23,6 +24,470 @@ CLIENT = InferenceHTTPClient(
     api_url=settings.ROBOFLOW_API_URL,
     api_key=settings.ROBOFLOW_API_KEY
 )
+
+# Initialize tokenizer for chunking
+tokenizer = tiktoken.encoding_for_model("gpt-4o-mini")
+
+def estimate_tokens(text: str) -> int:
+    """Estimate the number of tokens in a text string."""
+    return len(tokenizer.encode(text))
+
+def chunk_context_for_processing(context: str, question: str, max_chunk_tokens: int = 4000) -> List[Dict[str, str]]:
+    """Split large context into manageable chunks for processing."""
+    # Reserve tokens for question, prompt template, and response
+    system_overhead = estimate_tokens(f"""Based on the following context from the document, answer the user's question.
+    
+    Context:
+    
+    User question: {question}
+    
+    Provide a helpful and accurate answer:""")
+    
+    available_tokens = max_chunk_tokens - system_overhead - 500  # 500 tokens buffer for response
+    
+    if estimate_tokens(context) <= available_tokens:
+        return [{"chunk": context, "chunk_id": 1, "total_chunks": 1}]
+    
+    # Split context into smaller pieces
+    lines = context.split('\n\n')
+    chunks = []
+    current_chunk = ""
+    chunk_id = 1
+    
+    for line in lines:
+        test_chunk = current_chunk + "\n\n" + line if current_chunk else line
+        
+        if estimate_tokens(test_chunk) <= available_tokens:
+            current_chunk = test_chunk
+        else:
+            if current_chunk:
+                chunks.append({
+                    "chunk": current_chunk,
+                    "chunk_id": chunk_id,
+                    "total_chunks": 0  # Will be updated later
+                })
+                chunk_id += 1
+                current_chunk = line
+            else:
+                # Single line is too long, need to split it further
+                words = line.split(' ')
+                temp_chunk = ""
+                for word in words:
+                    test_word_chunk = temp_chunk + " " + word if temp_chunk else word
+                    if estimate_tokens(test_word_chunk) <= available_tokens:
+                        temp_chunk = test_word_chunk
+                    else:
+                        if temp_chunk:
+                            chunks.append({
+                                "chunk": temp_chunk,
+                                "chunk_id": chunk_id,
+                                "total_chunks": 0
+                            })
+                            chunk_id += 1
+                            temp_chunk = word
+                        else:
+                            # Single word is too long, truncate it
+                            temp_chunk = word[:available_tokens//2]
+                            chunks.append({
+                                "chunk": temp_chunk,
+                                "chunk_id": chunk_id,
+                                "total_chunks": 0
+                            })
+                            chunk_id += 1
+                            temp_chunk = ""
+                
+                if temp_chunk:
+                    current_chunk = temp_chunk
+    
+    if current_chunk:
+        chunks.append({
+            "chunk": current_chunk,
+            "chunk_id": chunk_id,
+            "total_chunks": 0
+        })
+    
+    # Update total_chunks count
+    total_chunks = len(chunks)
+    for chunk in chunks:
+        chunk["total_chunks"] = total_chunks
+    
+    return chunks
+
+def combine_chunk_responses(responses: List[str], question: str) -> str:
+    """Combine responses from multiple chunks into a coherent answer."""
+    if len(responses) == 1:
+        return responses[0]
+    
+    # Combine all responses
+    combined_text = "\n\n".join([f"Section {i+1}: {resp}" for i, resp in enumerate(responses)])
+    
+    # Use LLM to synthesize the combined responses
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+    synthesis_prompt = f"""I have gathered information from multiple sections of a document to answer this question: {question}
+
+Combined information from all sections:
+{combined_text}
+
+Please provide a comprehensive, coherent answer that synthesizes the information from all sections. Remove any redundancy and organize the information logically:"""
+    
+    try:
+        synthesis_response = llm.invoke(synthesis_prompt)
+        return synthesis_response.content
+    except Exception as e:
+        print(f"DEBUG: Error in synthesis, returning combined text: {e}")
+        return f"Based on the document analysis:\n\n" + "\n\n".join(responses)
+
+def get_internet_search_results(query: str, max_results: int = 3) -> str:
+    """Get internet search results for supplementary information."""
+    try:
+        # Initialize Tavily search tool with configuration from settings
+        tavily_search = TavilySearch(
+            max_results=max_results,
+            topic="general",
+            include_answer=True,
+            include_raw_content=False,
+            include_images=False
+        )
+        
+        # Execute the search
+        result = tavily_search.invoke({"query": query})
+        
+        # Format the results for inclusion in answers
+        search_results = result.get("results", [])
+        if not search_results:
+            return ""
+        
+        formatted_results = "Additional context from current information:\n"
+        for i, item in enumerate(search_results[:max_results], 1):
+            title = item.get("title", "No title")
+            content = item.get("content", "No content")
+            url = item.get("url", "")
+            
+            formatted_results += f"\n{i}. {title}\n"
+            formatted_results += f"   {content[:300]}..." if len(content) > 300 else f"   {content}"
+            if url:
+                formatted_results += f"\n   Source: {url}"
+            formatted_results += "\n"
+        
+        return formatted_results
+        
+    except Exception as e:
+        print(f"DEBUG: Internet search failed: {e}")
+        return ""
+
+def create_comprehensive_answer(doc_content: str, web_content: str, question: str, citations: List = None) -> str:
+    """Create a comprehensive answer combining document content and web information."""
+    try:
+        # Prepare the content for the LLM
+        combined_context = ""
+        
+        if doc_content:
+            combined_context += f"DOCUMENT INFORMATION:\n{doc_content}\n\n"
+        
+        if web_content:
+            combined_context += f"CURRENT INFORMATION:\n{web_content}\n\n"
+        
+        # If no content from either source, provide a helpful response
+        if not combined_context.strip():
+            return f"I understand you're asking about: {question}. Let me provide what I can tell you about this topic based on general knowledge and analysis capabilities. I can analyze both textual content and visual elements (layouts, diagrams, spatial relationships) when available. However, I recommend consulting current resources, expert documentation, and specialized sources for the most accurate and up-to-date information."
+        
+        # Create citation references if available
+        citation_text = ""
+        if citations:
+            citation_text = "\n\nDocument citations:\n"
+            for citation in citations[:5]:
+                citation_text += f"[{citation['id']}] Page {citation['page']}\n"
+        
+        # Use LLM to create comprehensive answer
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+        comprehensive_prompt = f"""Based on the following information sources, provide a comprehensive and detailed answer to the user's question. Synthesize information from both the document content (including any visual analysis) and current web sources to give the most complete response possible.
+
+QUESTION: {question}
+
+AVAILABLE INFORMATION:
+{combined_context}
+
+Please provide a thorough, well-organized answer that:
+1. Directly addresses the question
+2. Combines relevant information from all sources (document text, visual analysis, and web content)
+3. Provides specific details and examples where available
+4. Offers practical insights and recommendations
+5. Integrates visual information (layouts, designs, spatial relationships) when relevant
+6. Maintains accuracy while being comprehensive
+
+If some aspects of the question cannot be fully answered from the available sources, acknowledge this but still provide all relevant information that is available.{citation_text}"""
+        
+        response = llm.invoke(comprehensive_prompt)
+        return response.content
+        
+    except Exception as e:
+        print(f"DEBUG: Error creating comprehensive answer: {e}")
+        # Fallback to combining the content directly
+        fallback_answer = f"Based on the available information regarding '{question}':\n\n"
+        if doc_content:
+            fallback_answer += f"From the document: {doc_content}\n\n"
+        if web_content:
+            fallback_answer += f"Current information: {web_content}\n\n"
+        return fallback_answer or f"I understand you're asking about {question}. This appears to be an important topic that would benefit from consulting current expert sources and documentation."
+
+def should_use_internet_search(question: str) -> bool:
+    """Determine if a question requires internet search based on keywords and context."""
+    question_lower = question.lower()
+    
+    # Greetings and simple interactions - no search needed
+    greeting_patterns = ['hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening', 'how are you', 'thanks', 'thank you']
+    if any(greeting in question_lower for greeting in greeting_patterns):
+        return False
+    
+    # Keywords that indicate need for current/recent information
+    current_info_keywords = [
+        'current', 'recent', 'latest', 'new', 'updated', 'today', 'now', 'this year', 
+        'market trends', 'news', 'regulations', 'standards', 'prices', 'cost', 
+        'what is happening', 'what happened', 'recent developments', 'updates'
+    ]
+    
+    # Keywords that indicate document-based questions
+    document_keywords = [
+        'page', 'document', 'pdf', 'floor plan', 'drawing', 'diagram', 'layout',
+        'what does this show', 'what is on', 'describe', 'analyze', 'explain this'
+    ]
+    
+    # If question contains document-specific keywords, don't search internet
+    if any(keyword in question_lower for keyword in document_keywords):
+        return False
+    
+    # If question explicitly asks for current information, search internet
+    if any(keyword in question_lower for keyword in current_info_keywords):
+        return True
+    
+    # Default: don't search internet unless explicitly needed
+    return False
+
+def process_question_with_hybrid_search(doc_id: str, question: str, include_suggestions: bool = False) -> Dict:
+    """Process question using both document RAG and internet search for comprehensive answers with concurrent processing."""
+    doc_content = ""
+    web_content = ""
+    citations = []
+    most_referenced_page = None
+    suggestions = []
+    
+    import concurrent.futures
+    import threading
+    
+    # Results containers for concurrent operations
+    doc_result = {"content": "", "citations": [], "most_referenced_page": None}
+    web_result = {"content": ""}
+    
+    # Check if internet search is needed
+    needs_internet_search = should_use_internet_search(question)
+    
+    def fetch_document_content():
+        """Fetch document content in a separate thread with image analysis support."""
+        try:
+            print(f"DEBUG: Retrieving document content for: {question}")
+            docs = None
+            if getattr(pdf_processor, 'use_database_storage', False):
+                docs = pdf_processor.query_document_vectors(doc_id, question, k=8)
+                # docs is a list of dicts with 'page' and 'text'
+            else:
+                vs = pdf_processor.load_vectorstore(doc_id)
+                docs = vs.similarity_search(question, k=8)
+                # docs is a list of objects with .metadata and .page_content
+
+            if docs:
+                # Create citations from docs
+                doc_citations = []
+                for i, doc in enumerate(docs):
+                    if isinstance(doc, dict):
+                        doc_citations.append({
+                            "id": i + 1,
+                            "page": doc.get("page", 1),
+                            "text": doc.get("text", ""),
+                            "relevance_score": 0.8,
+                            "doc_id": doc_id
+                        })
+                    else:
+                        doc_citations.append({
+                            "id": i + 1,
+                            "page": doc.metadata.get("page", 1),
+                            "text": doc.page_content,
+                            "relevance_score": 0.8,
+                            "doc_id": doc_id
+                        })
+                # Find most referenced page
+                page_counts = {}
+                for citation in doc_citations:
+                    page = citation["page"]
+                    page_counts[page] = page_counts.get(page, 0) + 1
+                doc_most_referenced = None
+                if page_counts:
+                    doc_most_referenced = max(page_counts.items(), key=lambda x: x[1])[0]
+                
+                # Format document content
+                context = "\n\n".join([f"Page {d.metadata.get('page', 'N/A')}: {d.page_content}" for d in docs])
+                
+                # Check if visual analysis is needed for pages with minimal text
+                visual_analysis_needed = any(keyword in question.lower() for keyword in [
+                    'layout', 'arrangement', 'position', 'where', 'located', 'diagram', 'drawing', 
+                    'plan', 'design', 'visual', 'look', 'appearance', 'orientation', 'spatial', 
+                    'show', 'see', 'view', 'display', 'illustrate', 'color', 'shape', 'size'
+                ])
+                
+                multimodal_analysis = ""
+                if visual_analysis_needed:
+                    print(f"DEBUG: Visual question detected, checking pages for image analysis")
+                    # Get unique pages from docs
+                    relevant_pages = list(set(d.metadata.get('page', 1) for d in docs[:4]))  # Limit to 4 pages for speed
+                    
+                    try:
+                        doc_info = pdf_processor.get_document_info(doc_id)
+                        reader = PdfReader(doc_info["pdf_path"])
+                        
+                        # Check which pages need visual analysis (minimal text)
+                        pages_needing_visual = []
+                        for page_num in relevant_pages[:2]:  # Limit to 2 pages for speed
+                            try:
+                                if page_num <= len(reader.pages):
+                                    page = reader.pages[page_num - 1]
+                                    raw_text = page.extract_text()
+                                    if not raw_text or len(raw_text.strip()) < 50 or '[No text extracted:' in raw_text:
+                                        pages_needing_visual.append(page_num)
+                            except Exception as e:
+                                print(f"DEBUG: Error checking page {page_num} for visual analysis: {e}")
+                        
+                        # Perform visual analysis on pages that need it (max 1 for speed)
+                        if pages_needing_visual:
+                            print(f"DEBUG: Performing visual analysis on {len(pages_needing_visual[:1])} pages")
+                            for page_num in pages_needing_visual[:1]:
+                                try:
+                                    analysis = analyze_pdf_page_multimodal(doc_id, page_num)
+                                    multimodal_analysis += f"\n\nVisual analysis of page {page_num}:\n{analysis}"
+                                except Exception as e:
+                                    print(f"DEBUG: Error in visual analysis for page {page_num}: {e}")
+                                    continue
+                    except Exception as e:
+                        print(f"DEBUG: Error in visual analysis setup: {e}")
+                
+                # Combine text and visual content
+                enhanced_context = context
+                if multimodal_analysis:
+                    enhanced_context += f"\n\nAdditional visual insights:{multimodal_analysis}"
+                
+                # Handle chunking if necessary (smaller chunks for speed)
+                chunks = chunk_context_for_processing(enhanced_context, question, max_chunk_tokens=3000)
+                
+                if len(chunks) == 1:
+                    doc_result["content"] = chunks[0]['chunk']
+                else:
+                    # Process multiple chunks quickly
+                    chunk_responses = []
+                    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+                    
+                    for chunk_info in chunks[:3]:  # Limit to 3 chunks for speed
+                        prompt = f"""Extract key information from this document section for: {question}
+
+Section:
+{chunk_info['chunk']}
+
+Provide only relevant information (max 2 sentences). If no relevant info, respond "No relevant information.":"""
+                        
+                        try:
+                            chunk_response = llm.invoke(prompt)
+                            if "No relevant information" not in chunk_response.content:
+                                chunk_responses.append(chunk_response.content)
+                        except Exception as e:
+                            print(f"DEBUG: Error processing document chunk: {e}")
+                            continue
+                    
+                    if chunk_responses:
+                        doc_result["content"] = "\n\n".join(chunk_responses)
+                
+                doc_result["citations"] = doc_citations
+                doc_result["most_referenced_page"] = doc_most_referenced
+                
+        except Exception as e:
+            print(f"DEBUG: Error retrieving document content: {e}")
+    
+    def fetch_web_content():
+        """Fetch web content in a separate thread - only if needed."""
+        try:
+            if needs_internet_search:
+                print(f"DEBUG: Searching internet for: {question}")
+                web_result["content"] = get_internet_search_results(question, max_results=2)  # Reduced for speed
+            else:
+                print(f"DEBUG: Skipping internet search for: {question}")
+        except Exception as e:
+            print(f"DEBUG: Error fetching web content: {e}")
+    
+    try:
+        # Execute operations - concurrent only if internet search is needed
+        if needs_internet_search:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                # Submit both tasks
+                doc_future = executor.submit(fetch_document_content)
+                web_future = executor.submit(fetch_web_content)
+                
+                # Wait for both to complete with timeout for speed
+                try:
+                    concurrent.futures.wait([doc_future, web_future], timeout=10.0)  # 10 second timeout
+                except concurrent.futures.TimeoutError:
+                    print("DEBUG: Timeout in concurrent processing, proceeding with available results")
+        else:
+            # Only fetch document content
+            fetch_document_content()
+        
+        # Extract results
+        doc_content = doc_result["content"]
+        web_content = web_result["content"]
+        citations = doc_result["citations"]
+        most_referenced_page = doc_result["most_referenced_page"]
+        
+        # Generate suggestions quickly if requested
+        if include_suggestions and citations:
+            relevant_pages = list(set(c["page"] for c in citations[:3]))  # Reduced for speed
+            for i, page_num in enumerate(relevant_pages[:2]):  # Max 2 suggestions for speed
+                suggestions.append({
+                    "title": f"Page {page_num} Details",
+                    "page": page_num,
+                    "description": f"Additional information on page {page_num}."
+                })
+        
+        # Create comprehensive answer with timeout protection
+        try:
+            comprehensive_answer = create_comprehensive_answer(doc_content, web_content, question, citations)
+        except Exception as e:
+            print(f"DEBUG: Error in comprehensive answer generation: {e}")
+            # Quick fallback
+            comprehensive_answer = f"Based on available information regarding '{question}': "
+            if doc_content:
+                comprehensive_answer += f"From the document: {doc_content[:500]}... "
+            if web_content:
+                comprehensive_answer += f"Current information: {web_content[:500]}..."
+            if not doc_content and not web_content:
+                comprehensive_answer += "This topic requires further research from current expert sources and documentation."
+        
+        return {
+            "answer": comprehensive_answer,
+            "suggestions": suggestions,
+            "citations": citations,
+            "most_referenced_page": most_referenced_page,
+            "has_document_content": bool(doc_content),
+            "has_web_content": bool(web_content)
+        }
+        
+    except Exception as e:
+        print(f"DEBUG: Error in hybrid search processing: {e}")
+        # Ultra-fast fallback response
+        fallback_answer = f"I understand you're asking about: {question}. This is an important topic. Based on general knowledge and best practices, I can provide that this involves multiple considerations including technical specifications, practical factors, regulatory requirements, and current standards. For the most comprehensive and accurate information, I recommend consulting current expert sources, documentation, and specialized resources relevant to your specific context."
+        
+        return {
+            "answer": fallback_answer,
+            "suggestions": [],
+            "citations": [],
+            "most_referenced_page": None,
+            "has_document_content": False,
+            "has_web_content": False
+        }
 
 @tool
 def load_pdf_for_floorplan(pdf_path: str) -> str:
@@ -439,15 +904,39 @@ def verify_detections(image_path: str, objects_json: str, requested_object: str)
         response = {
             "requested_object_found": False,
             "class_counts": class_counts,
-            "message": ""
+            "message": "",
+            "suggested_filter_condition": ""
         }
 
         requested_object_lower = requested_object.lower()
-        if any(requested_object_lower in cls for cls in class_counts.keys()):
+        found_classes = []
+        
+        # Check for exact matches and partial matches
+        for cls in class_counts.keys():
+            if requested_object_lower == cls:
+                # Exact match
+                found_classes.append(cls)
+                break
+            elif requested_object_lower in cls or cls in requested_object_lower:
+                # Partial match
+                found_classes.append(cls)
+        
+        if found_classes:
             response['requested_object_found'] = True
-            response['message'] = f"Verification successful: Detections include objects matching '{requested_object}'."
+            matched_class = found_classes[0]
+            count = class_counts[matched_class]
+            response['message'] = f"Verification successful: Found {count} objects matching '{requested_object}' (class: '{matched_class}')."
+            response['suggested_filter_condition'] = matched_class
         else:
+            # No matches found
             response['message'] = f"Verification failed: No objects matching '{requested_object}' were detected. Available classes: {sorted(list(class_counts.keys()))}"
+            # Try to suggest the most similar class name
+            if class_counts:
+                # Find the most similar class name
+                import difflib
+                closest_matches = difflib.get_close_matches(requested_object_lower, class_counts.keys(), n=3, cutoff=0.3)
+                if closest_matches:
+                    response['message'] += f"\n\nDid you mean one of these? {closest_matches}"
 
         return json.dumps(response, indent=2)
 
@@ -456,18 +945,25 @@ def verify_detections(image_path: str, objects_json: str, requested_object: str)
 
 @tool
 def answer_question_using_rag(doc_id: str, question: str) -> str:
-    """Fast text-only RAG for questions that don't require visual analysis."""
+    """Answer questions using document content only - simple and fast."""
     try:
-        vs = pdf_processor.load_vectorstore(doc_id)
-        docs = vs.similarity_search(question, k=4)  # Reduced for speed
-        
+        print(f"DEBUG: Processing question with document-only approach: {question}")
+        docs = None
+        if getattr(pdf_processor, 'use_database_storage', False):
+            docs = pdf_processor.query_document_vectors(doc_id, question, k=4)
+            # docs is a list of dicts with 'page' and 'text'
+            context = "\n\n".join([f"Page {d.get('page', 'N/A')}: {d.get('text', '')}" for d in docs[:3]])
+        else:
+            vs = pdf_processor.load_vectorstore(doc_id)
+            docs = vs.similarity_search(question, k=4)
+            # docs is a list of objects with .metadata and .page_content
+            context = "\n\n".join([f"Page {d.metadata.get('page', 'N/A')}: {d.page_content}" for d in docs[:3]])
+
         if not docs:
             return "I couldn't find any relevant information in the document to answer your question."
-        
-        # Format the context (text only, no image analysis)
-        context = "\n\n".join([f"Page {d.metadata.get('page', 'N/A')}: {d.page_content}" for d in docs[:3]])
-        
+
         # Use LLM to generate a response based on the context
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
         prompt = f"""Based on the following context from the document, answer the user's question concisely.
 
 Context:
@@ -476,14 +972,13 @@ Context:
 User question: {question}
 
 Provide a helpful and accurate answer:"""
-        
-        llm = ChatOpenAI(model="gpt-4o", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+
         rag_response = llm.invoke(prompt)
-        
         return rag_response.content
-        
+
     except Exception as e:
-        return f"Error answering question: {str(e)}"
+        print(f"DEBUG: Error in document RAG: {e}")
+        return f"I encountered an error while processing your question. Please try rephrasing your question or check if the document is properly loaded."
 
 @tool
 def quick_page_analysis(doc_id: str, page_number: int = 1) -> str:
@@ -503,7 +998,7 @@ def quick_page_analysis(doc_id: str, page_number: int = 1) -> str:
             return f"Page {page_number} contains primarily visual content with minimal extractable text. Consider using visual analysis for detailed information."
         
         # Quick text-based analysis using LLM
-        llm = ChatOpenAI(model="gpt-4o", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
         analysis_prompt = f"""Analyze the text content from this document page and provide a concise summary.
 
 Page {page_number} content:
@@ -519,97 +1014,31 @@ Provide a brief but informative summary of the key information on this page:"""
 
 @tool
 def answer_question_using_rag(doc_id: str, question: str) -> str:
-    """Answer questions about the document using RAG (Retrieval Augmented Generation) with citations."""
+    """Answer questions using hybrid approach with citations, combining document and web content."""
     try:
-        # Get citations and context
-        try:
-            citation_result = pdf_processor.query_document_with_citations(doc_id, question, k=5)
-            citations = citation_result.get("citations", [])
-            page_summary = pdf_processor.get_page_citations_summary(doc_id, question, k=5)
-            most_referenced_page = page_summary.get("most_relevant_page")
-        except Exception as e:
-            print(f"DEBUG: Error getting citations, falling back to basic RAG: {e}")
-            # Fallback to basic processing
-            vs = pdf_processor.load_vectorstore(doc_id)
-            docs = vs.similarity_search(question, k=5)
-            
-            if not docs:
-                return json.dumps({
-                    "answer": "I couldn't find any relevant information in the document to answer your question.",
-                    "citations": [],
-                    "most_referenced_page": None
-                })
-            
-            # Create basic citations from docs
-            citations = []
-            for i, doc in enumerate(docs):
-                citations.append({
-                    "id": i + 1,
-                    "page": doc.metadata.get("page", 1),
-                    "text": doc.page_content,
-                    "relevance_score": 0.8,  # Default score
-                    "doc_id": doc_id
-                })
-            
-            # Find most referenced page
-            page_counts = {}
-            for citation in citations:
-                page = citation["page"]
-                page_counts[page] = page_counts.get(page, 0) + 1
-            
-            most_referenced_page = max(page_counts.items(), key=lambda x: x[1])[0] if page_counts else None
+        print(f"DEBUG: Processing question with hybrid approach and citations: {question}")
         
-        if not citations:
-            return json.dumps({
-                "answer": "I couldn't find any relevant information in the document to answer your question.",
-                "citations": [],
-                "most_referenced_page": None
-            })
+        # Use the new hybrid search function
+        result = process_question_with_hybrid_search(doc_id, question, include_suggestions=False)
         
-        # Format the context from citations
-        context = "\n\n".join([f"Page {c['page']}: {c['text']}" for c in citations[:4]])
+        # Format the response as JSON with citations
+        response_data = {
+            "answer": result["answer"],
+            "citations": result["citations"],
+            "most_referenced_page": result["most_referenced_page"]
+        }
         
-        # Create citation references for the prompt
-        citation_text = "\n\nCitation references:\n"
-        for citation in citations[:4]:  # Include up to 4 citations
-            citation_text += f"[{citation['id']}] Page {citation['page']}\n"
-        
-        # Use LLM to generate a response based on the context
-        prompt = f"""Based on the following context from the document, answer the user's question.
-
-Context:
-{context}
-
-User question: {question}
-
-Provide a helpful and accurate answer. IMPORTANT: Include citation references in your response using the format [1], [2], etc. to reference the source pages. Add a citations section at the end listing the page numbers.
-
-Available citations:
-{citation_text}"""
-        
-        llm = ChatOpenAI(model="gpt-4o", temperature=0.0, api_key=settings.OPENAI_API_KEY)
-        rag_response = llm.invoke(prompt)
-        
-        # Ensure the response includes proper citations by adding them if missing
-        response_text = rag_response.content
-        if not any(f"[{i}]" in response_text for i in range(1, 5)):
-            # If no citations were included, add them at the end
-            response_text += "\n\nSources:"
-            for citation in citations[:3]:  # Show top 3 sources
-                response_text += f"\n- Page {citation['page']}"
-        
-        return json.dumps({
-            "answer": response_text,
-            "citations": citations,
-            "most_referenced_page": most_referenced_page
-        })
+        return json.dumps(response_data)
         
     except Exception as e:
-        return json.dumps({
-            "answer": f"Error answering question: {str(e)}",
+        print(f"DEBUG: Error in hybrid RAG with citations: {e}")
+        # Provide a helpful fallback response even on error
+        fallback_response = {
+            "answer": f"I understand you're asking about: {question}. This is an important topic that requires comprehensive analysis. Based on best practices and general knowledge, I can provide relevant insights. However, I recommend consulting current documentation, expert resources, and up-to-date information sources for the most complete and accurate understanding.",
             "citations": [],
             "most_referenced_page": None
-        })
+        }
+        return json.dumps(fallback_response)
 
 def analyze_pdf_page_multimodal(doc_id: str, page_number: int = 1) -> str:
     """Optimized multimodal analysis of a PDF page using both text and visual analysis."""
@@ -648,7 +1077,7 @@ def analyze_pdf_page_multimodal(doc_id: str, page_number: int = 1) -> str:
             page_text = raw_text
         
         # Use multimodal LLM to analyze both image and text
-        llm = ChatOpenAI(model="gpt-4o", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
         
         # OPTIMIZATION: Shorter, more focused prompt for faster processing
         message_content = [
@@ -686,258 +1115,96 @@ def encode_image(image_path):
 
 @tool
 def answer_question_with_suggestions(doc_id: str, question: str) -> str:
-    """Answer questions about the document using optimized processing with smart image analysis fallback and citations."""
+    """Answer questions about the document using simple RAG with suggestions - no hybrid approach."""
     try:
-        # Check if the question is asking about a specific page
-        import re
-        page_match = re.search(r'\bpage\s+(\d+)\b', question.lower())
-        specific_page = int(page_match.group(1)) if page_match else None
+        print(f"DEBUG: Processing question with document-only approach: {question}")
         
-        # OPTIMIZATION 1: Fast text-only check first
-        # Check if we can answer the question with text alone before using image analysis
-        can_use_text_only = not any(keyword in question.lower() for keyword in [
-            'layout', 'arrangement', 'position', 'where', 'located', 'diagram', 'drawing', 
-            'plan', 'design', 'visual', 'look', 'appearance', 'orientation', 'spatial', 
-            'show', 'see', 'view', 'display', 'illustrate', 'color', 'shape', 'size'
-        ])
-        
-        # If asking about a specific page, use optimized direct analysis
-        if specific_page:
-            print(f"DEBUG: Direct page request detected for page {specific_page}")
-            
-            try:
-                doc_info = pdf_processor.get_document_info(doc_id)
-                reader = PdfReader(doc_info["pdf_path"])
-                
-                if specific_page > len(reader.pages):
-                    return json.dumps({
-                        "answer": f"Error: Page {specific_page} does not exist. Document has {len(reader.pages)} pages.",
-                        "suggestions": [],
-                        "citations": [],
-                        "most_referenced_page": None
-                    })
-                
-                # Extract text from the specific page
-                page = reader.pages[specific_page - 1]
-                raw_text = page.extract_text()
-                has_meaningful_text = raw_text and len(raw_text.strip()) > 20 and '[No text extracted:' not in raw_text
-                
-                # OPTIMIZATION 2: Use text-only analysis when possible
-                if has_meaningful_text and can_use_text_only:
-                    print(f"DEBUG: Page {specific_page} has sufficient text, using text-only analysis (FAST)")
-                    
-                    llm = ChatOpenAI(model="gpt-4o", temperature=0.0, api_key=settings.OPENAI_API_KEY)
-                    answer_prompt = f"""Based on the text content from page {specific_page}, answer the user's question.
-
-Page {specific_page} content:
-{raw_text}
-
-User question: {question}
-
-Provide a comprehensive answer and include a citation reference at the end in the format: [Source: Page {specific_page}]"""
-                    
-                    rag_response = llm.invoke(answer_prompt)
-                    
-                    # Create a simple citation for this page
-                    citation = {
-                        "id": 1,
-                        "page": specific_page,
-                        "text": raw_text[:200] + "..." if len(raw_text) > 200 else raw_text,
-                        "relevance_score": 1.0,
-                        "doc_id": doc_id
-                    }
-                    
-                    return json.dumps({
-                        "answer": rag_response.content,
-                        "suggestions": [{
-                            "title": f"Page {specific_page} Content",
-                            "page": specific_page,
-                            "description": "Detailed text-based analysis of this page's content."
-                        }],
-                        "citations": [citation],
-                        "most_referenced_page": specific_page
-                    })
-                
-                # OPTIMIZATION 3: Only use multimodal for visual questions or pages without text
-                elif not has_meaningful_text or not can_use_text_only:
-                    print(f"DEBUG: Page {specific_page} requires visual analysis - text insufficient or visual question")
-                    multimodal_result = analyze_pdf_page_multimodal(doc_id, specific_page)
-                    
-                    # Add citation reference to visual analysis
-                    visual_result_with_citation = f"{multimodal_result}\n\n[Source: Page {specific_page} - Visual Analysis]"
-                    
-                    # Create a simple citation for visual analysis
-                    citation = {
-                        "id": 1,
-                        "page": specific_page,
-                        "text": "Visual analysis of page content",
-                        "relevance_score": 1.0,
-                        "doc_id": doc_id
-                    }
-                    
-                    return json.dumps({
-                        "answer": visual_result_with_citation,
-                        "suggestions": [{
-                            "title": f"Page {specific_page} Visual Analysis",
-                            "page": specific_page,
-                            "description": "Visual analysis of architectural elements and layout."
-                        }],
-                        "citations": [citation],
-                        "most_referenced_page": specific_page
-                    })
-                
-            except Exception as e:
-                print(f"DEBUG: Error in direct page analysis: {e}")
-                # Fall through to regular processing
-        
-        # OPTIMIZATION 4: Smart RAG with minimal image analysis and citations
-        # Only use RAG for multi-page questions or when specific page isn't requested
-        print(f"DEBUG: Using optimized multi-page analysis with citations (text-focused)")
-        
-        # Get citations and page summary
-        try:
-            citation_result = pdf_processor.query_document_with_citations(doc_id, question, k=6)
-            page_summary = pdf_processor.get_page_citations_summary(doc_id, question, k=6)
-            most_referenced_page = page_summary.get("most_relevant_page")
-            
-            citations = citation_result.get("citations", [])
-            print(f"DEBUG: Found {len(citations)} citations across {len(citation_result.get('pages_referenced', []))} pages")
-            
-        except Exception as e:
-            print(f"DEBUG: Error getting citations, falling back to regular RAG: {e}")
-            # Fallback to regular processing without citations
+        # Use simple document search only
+        docs = None
+        if getattr(pdf_processor, 'use_database_storage', False):
+            docs = pdf_processor.query_document_vectors(doc_id, question, k=6)
+            context = "\n\n".join([f"Page {d.get('page', 'N/A')}: {d.get('text', '')}" for d in docs[:4]])
+        else:
             vs = pdf_processor.load_vectorstore(doc_id)
             docs = vs.similarity_search(question, k=6)
-            citations = []
-            most_referenced_page = None
-            
-            if docs:
-                for i, doc in enumerate(docs):
-                    citations.append({
-                        "id": i + 1,
-                        "page": doc.metadata.get("page", 1),
-                        "text": doc.page_content,
-                        "relevance_score": 0.8,  # Default score
-                        "doc_id": doc_id
-                    })
-                
-                # Find most referenced page
-                page_counts = {}
-                for citation in citations:
-                    page = citation["page"]
-                    page_counts[page] = page_counts.get(page, 0) + 1
-                
-                if page_counts:
-                    most_referenced_page = max(page_counts.items(), key=lambda x: x[1])[0]
-        
-        if not citations:
-            return json.dumps({
-                "answer": "I couldn't find any relevant information in the document to answer your question.",
-                "suggestions": [],
-                "citations": [],
-                "most_referenced_page": None
-            })
-        
-        # Format context from citations
-        main_citations = citations[:4]  # Reduced from 5 for speed
-        context = "\n\n".join([f"Page {c['page']}: {c['text']}" for c in main_citations])
-        
-        # OPTIMIZATION 5: Only analyze images for pages that definitely need it
-        relevant_pages = list(set(c["page"] for c in main_citations))
-        multimodal_analysis = ""
-        
-        # Only do image analysis if:
-        # 1. Question explicitly requires visual understanding, AND
-        # 2. We found pages with no text content
-        if not can_use_text_only:
-            print(f"DEBUG: Visual question detected, checking for pages with no text")
-            
-            pages_needing_visual = []
-            doc_info = pdf_processor.get_document_info(doc_id)
-            reader = PdfReader(doc_info["pdf_path"])
-            
-            # Check only the most relevant pages (max 2 for speed)
-            for page_num in relevant_pages[:2]:
-                try:
-                    if page_num <= len(reader.pages):
-                        page = reader.pages[page_num - 1]
-                        raw_text = page.extract_text()
-                        if not raw_text or len(raw_text.strip()) < 20 or '[No text extracted:' in raw_text:
-                            pages_needing_visual.append(page_num)
-                except Exception as e:
-                    print(f"Error checking text for page {page_num}: {e}")
-            
-            # Only analyze pages that truly need visual analysis (max 1 for speed)
-            if pages_needing_visual:
-                print(f"DEBUG: Analyzing {len(pages_needing_visual[:1])} pages visually")
-                for page_num in pages_needing_visual[:1]:  # Limit to 1 page for speed
-                    try:
-                        analysis = analyze_pdf_page_multimodal(doc_id, page_num)
-                        multimodal_analysis += f"\n\nVisual analysis of page {page_num}:\n{analysis}"
-                    except Exception as e:
-                        print(f"DEBUG: Error in multimodal analysis for page {page_num}: {e}")
-                        continue
-            else:
-                print(f"DEBUG: All relevant pages have sufficient text, skipping image analysis")
-        
-        # Generate answer using available context
-        llm = ChatOpenAI(model="gpt-4o", temperature=0.0, api_key=settings.OPENAI_API_KEY)
-        
-        enhanced_context = context
-        if multimodal_analysis:
-            enhanced_context += f"\n\nAdditional visual analysis:{multimodal_analysis}"
-        
-        # Create citation references for the prompt
-        citation_text = "\n\nCitation references:\n"
-        for citation in citations[:5]:  # Include up to 5 citations
-            citation_text += f"[{citation['id']}] Page {citation['page']}\n"
-            
-        answer_prompt = f"""Based on the following context from the document, answer the user's question.
+            context = "\n\n".join([f"Page {d.metadata.get('page', 'N/A')}: {d.page_content}" for d in docs[:4]])
+
+        # Generate suggestions and citations
+        suggestions = []
+        citations = []
+        most_referenced_page = None
+        if docs:
+            for i, d in enumerate(docs[:3]):
+                if isinstance(d, dict):
+                    page = d.get('page', 'N/A')
+                    text = d.get('text', '')
+                else:
+                    page = getattr(d, 'metadata', {}).get('page', 'N/A') if hasattr(d, 'metadata') else 'N/A'
+                    text = getattr(d, 'page_content', '')
+                suggestions.append({
+                    "title": f"Page {page} Content",
+                    "page": page,
+                    "description": f"Additional information available on page {page}."
+                })
+                citations.append({
+                    "id": i + 1,
+                    "page": page,
+                    "text": text,
+                    "relevance_score": 1.0,
+                    "doc_id": doc_id
+                })
+            most_referenced_page = citations[0]["page"] if citations else None
+
+        # Use LLM to generate a response based on the context
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+        prompt = f"""Based on the following context from the document, answer the user's question and provide related topic suggestions with page numbers.
 
 Context:
-{enhanced_context}
+{context}
 
 User question: {question}
 
-Provide a helpful and accurate answer. IMPORTANT: Include citation references in your response using the format [1], [2], etc. to reference the source pages. Add a citations section at the end listing the page numbers.
+Provide a helpful and accurate answer. Include suggestions and cite relevant pages."""
+        rag_response = llm.invoke(prompt)
 
-Available citations:
-{citation_text}"""
-        
-        rag_response = llm.invoke(answer_prompt)
-        
-        # Ensure the response includes proper citations by adding them if missing
-        response_text = rag_response.content
-        if not any(f"[{i}]" in response_text for i in range(1, 6)):
-            # If no citations were included, add them at the end
-            response_text += "\n\nSources:"
-            for citation in citations[:3]:  # Show top 3 sources
-                response_text += f"\n- Page {citation['page']}"
-        
-        # Generate lightweight suggestions (reduced complexity)
-        suggestions = []
-        for i, page_num in enumerate(relevant_pages[:3]):  # Max 3 suggestions
+        response_data = {
+            "answer": rag_response.content,
+            "suggestions": suggestions,
+            "citations": citations,
+            "most_referenced_page": most_referenced_page,
+            "source_info": {
+                "has_document_content": bool(docs),
+                "has_web_content": False
+            }
+        }
+        return json.dumps(response_data)
+        for page_num in relevant_pages[:3]:  # Max 3 suggestions
             suggestions.append({
                 "title": f"Page {page_num} Content",
                 "page": page_num,
                 "description": f"Additional information available on page {page_num}."
             })
         
-        return json.dumps({
+        response_data = {
             "answer": response_text,
             "suggestions": suggestions,
             "citations": citations,
             "most_referenced_page": most_referenced_page
-        })
+        }
+        
+        return json.dumps(response_data)
         
     except Exception as e:
-        print(f"DEBUG: Error in optimized answer_question_with_suggestions: {str(e)}")
-        return json.dumps({
-            "answer": f"Error processing question: {str(e)}",
+        print(f"DEBUG: Error in document RAG with suggestions: {e}")
+        # Provide a simple fallback response
+        fallback_response = {
+            "answer": f"I encountered an error while processing your question about: {question}. Please try rephrasing your question or check if the document is properly loaded.",
             "suggestions": [],
             "citations": [],
             "most_referenced_page": None
-        })
+        }
+        return json.dumps(fallback_response)
+
 
 @tool
 def save_annotated_image_as_pdf_page(image_path: str, original_pdf_path: str, page_number: int, output_pdf_path: str) -> str:
@@ -986,7 +1253,7 @@ def save_annotated_image_as_pdf_page(image_path: str, original_pdf_path: str, pa
 
         # Verify the output file was created
         if os.path.exists(output_pdf_path):
-            return f"SUCCESS: Annotated PDF saved successfully to '{output_pdf_path}'. File size: {os.path.getsize(output_pdf_path)} bytes."
+            return f"SUCCESS: Annotated PDF saved successfully to '{output_pdf_path}'. If you need any further assistance or additional annotations, feel free to ask!"
         else:
             return f"Error: Failed to create output PDF at '{output_pdf_path}'."
 
@@ -995,8 +1262,7 @@ def save_annotated_image_as_pdf_page(image_path: str, original_pdf_path: str, pa
 
 @tool
 def internet_search(query: str) -> str:
-    """Search the internet for up-to-date information when needed to answer user queries or when
-    user questions require more detailed information beyond the available context"""
+    """Search the internet for up-to-date information when needed to answer user queries."""
     try:
         # Initialize Tavily search tool with configuration from settings
         tavily_search = TavilySearch(

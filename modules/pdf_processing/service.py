@@ -3,7 +3,8 @@ PDF processing and document management for the Floor Plan Agent API
 """
 import os
 import uuid
-from typing import List
+import io
+from typing import List, Dict, Any
 from pypdf import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
@@ -19,10 +20,22 @@ class PDFProcessor:
     def __init__(self):
         self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=200)
         self.embeddings = OpenAIEmbeddings(api_key=settings.OPENAI_API_KEY)
+        self.use_database_storage = settings.USE_RDS and settings.IS_POSTGRES
     
-    def pdf_to_documents(self, pdf_path: str, doc_id: str) -> List[Document]:
-        """Convert PDF to document chunks for indexing"""
-        reader = PdfReader(pdf_path)
+    def pdf_to_documents(self, pdf_source, doc_id: str) -> List[Document]:
+        """Convert PDF to document chunks for indexing
+        
+        Args:
+            pdf_source: Either a file path (str) or bytes data
+            doc_id: Document identifier
+        """
+        if isinstance(pdf_source, bytes):
+            # Read from bytes (database storage)
+            reader = PdfReader(io.BytesIO(pdf_source))
+        else:
+            # Read from file path (legacy file storage)
+            reader = PdfReader(pdf_source)
+        
         docs: List[Document] = []
         
         for i, page in enumerate(reader.pages, start=1):
@@ -39,24 +52,199 @@ class PDFProcessor:
         
         return docs
     
-    def index_pdf(self, doc_id: str, pdf_path: str) -> int:
-        """Index PDF into vector store"""
-        docs = self.pdf_to_documents(pdf_path, doc_id)
+    def pdf_bytes_to_documents(self, pdf_data: bytes, doc_id: str) -> List[Document]:
+        """Convert PDF bytes to document chunks for indexing"""
+        return self.pdf_to_documents(pdf_data, doc_id)
+    
+    def index_pdf(self, doc_id: str, pdf_source) -> int:
+        """Index PDF into vector store
+        
+        Args:
+            doc_id: Document identifier
+            pdf_source: Either file path (str) or bytes data
+        """
+        docs = self.pdf_to_documents(pdf_source, doc_id)
         if not docs:
             raise ValueError("No text extracted from PDF")
         
-        vs = FAISS.from_documents(docs, self.embeddings)
-        vs.save_local(os.path.join(settings.VECTORS_DIR, doc_id))
+        if self.use_database_storage:
+            # Store vectors in database using pgvector
+            return self.index_pdf_to_database(doc_id, docs)
+        else:
+            # Store vectors in local FAISS files (legacy)
+            vs = FAISS.from_documents(docs, self.embeddings)
+            vs.save_local(os.path.join(settings.VECTORS_DIR, doc_id))
+            return len(docs)
+    
+    def index_pdf_to_database(self, doc_id: str, docs: List[Document]) -> int:
+        """Index PDF documents to database using pgvector"""
+        if not self.use_database_storage:
+            raise Exception("Database storage not available")
         
-        return len(docs)
+        # Generate embeddings for all chunks
+        texts = [doc.page_content for doc in docs]
+        embeddings = self.embeddings.embed_documents(texts)
+        
+        # Prepare chunks for database storage
+        chunks = []
+        for doc, embedding in zip(docs, embeddings):
+            chunks.append({
+                'text': doc.page_content,
+                'page': doc.metadata.get('page', 1),
+                'embedding': embedding
+            })
+        
+        # Store in database
+        stored_count = db_manager.store_vector_chunks(doc_id, chunks)
+        return stored_count
     
     def load_vectorstore(self, doc_id: str) -> FAISS:
-        """Load vector store for a document"""
+        """Load vector store for a document (legacy file storage)"""
+        if self.use_database_storage:
+            raise Exception("Use query_document_vectors for database storage")
+        
         path = os.path.join(settings.VECTORS_DIR, doc_id)
         if not os.path.exists(path):
             raise FileNotFoundError("Vectorstore for doc not found.")
         
         return FAISS.load_local(path, self.embeddings, allow_dangerous_deserialization=True)
+    
+    def get_document_content(self, doc_id: str) -> bytes:
+        """Get document content from database"""
+        if not self.use_database_storage:
+            raise Exception("Document content retrieval only available with database storage")
+        
+        document = db_manager.get_document_by_doc_id(doc_id)
+        if not document:
+            raise FileNotFoundError("Document not found")
+        
+        file_storage = db_manager.get_file(document.file_id)
+        if not file_storage:
+            raise FileNotFoundError("Document file not found")
+        
+        return file_storage.file_data
+    
+    def query_document_vectors(self, doc_id: str, question: str, k: int = 5) -> List[Dict[str, Any]]:
+        """Query document using database vector storage"""
+        if not self.use_database_storage:
+            raise Exception("Vector querying only available with database storage")
+        
+        # Generate embedding for the question
+        query_embedding = self.embeddings.embed_query(question)
+        
+        # Perform similarity search
+        results = db_manager.similarity_search(doc_id, query_embedding, k)
+        
+        return results
+    
+    def delete_document_completely(self, doc_id: str) -> bool:
+        """Delete document and all associated data"""
+        try:
+            document = db_manager.get_document_by_doc_id(doc_id)
+            if not document:
+                return False
+            
+            if self.use_database_storage:
+                # Delete from database storage
+                success = True
+                
+                # Delete vector chunks
+                try:
+                    db_manager.delete_vector_chunks(doc_id)
+                except:
+                    success = False
+                
+                # Delete file
+                if document.file_id:
+                    try:
+                        db_manager.delete_file(document.file_id)
+                    except:
+                        success = False
+                
+                # Delete document record
+                try:
+                    db_manager.delete_document(doc_id)
+                except:
+                    success = False
+                
+                return success
+            else:
+                # Delete from file storage (legacy)
+                return self.delete_document_files(doc_id)
+                
+        except Exception as e:
+            print(f"Error deleting document {doc_id}: {e}")
+            return False
+    
+    def store_generated_output(self, output_data: bytes, filename: str, source_doc_id: str, 
+                              user_id: int, metadata: Dict[str, Any] = None) -> str:
+        """Store generated output file and return output_id"""
+        if not self.use_database_storage:
+            raise Exception("Generated output storage only available with database storage")
+        
+        output_id = str(uuid.uuid4())
+        
+        success = db_manager.store_generated_output(
+            output_id=output_id,
+            filename=filename,
+            content_type="application/pdf",
+            file_data=output_data,
+            source_doc_id=source_doc_id,
+            user_id=user_id,
+            metadata=metadata
+        )
+        
+        if success:
+            return output_id
+        else:
+            raise Exception("Failed to store generated output")
+    
+    def get_generated_output(self, output_id: str) -> Dict[str, Any]:
+        """Get generated output by ID"""
+        if not self.use_database_storage:
+            raise Exception("Generated output retrieval only available with database storage")
+        
+        output = db_manager.get_generated_output(output_id)
+        if not output:
+            raise FileNotFoundError("Generated output not found")
+        
+        return output.to_dict(include_data=True)
+    
+    def list_user_generated_outputs(self, user_id: int) -> List[Dict[str, Any]]:
+        """List all generated outputs for a user"""
+        if not self.use_database_storage:
+            raise Exception("Generated output listing only available with database storage")
+        
+        outputs = db_manager.list_generated_outputs(user_id)
+        return [output.to_dict(include_data=False) for output in outputs]
+    
+    def delete_generated_output(self, output_id: str) -> bool:
+        """Delete generated output by ID"""
+        if not self.use_database_storage:
+            raise Exception("Generated output deletion only available with database storage")
+        
+        return db_manager.delete_generated_output(output_id)
+    
+    def save_output_to_database_or_file(self, output_data: bytes, filename: str, 
+                                       source_doc_id: str, user_id: int, 
+                                       metadata: Dict[str, Any] = None) -> str:
+        """Save output to database if available, otherwise to file system"""
+        if self.use_database_storage:
+            # Store in database
+            return self.store_generated_output(output_data, filename, source_doc_id, user_id, metadata)
+        else:
+            # Store in file system (legacy)
+            if settings.OUTPUT_DIR is None:
+                import tempfile
+                output_path = os.path.join(tempfile.gettempdir(), filename)
+            else:
+                output_path = os.path.join(settings.OUTPUT_DIR, filename)
+                os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
+            
+            with open(output_path, 'wb') as f:
+                f.write(output_data)
+            
+            return output_path
     
     def upload_and_index_pdf(self, file_content: bytes, filename: str, user_id: int) -> dict:
         """Upload and index a PDF file"""
@@ -64,48 +252,90 @@ class PDFProcessor:
             raise ValueError("Please upload a PDF file")
         
         doc_id = uuid.uuid4().hex
-        pdf_path = os.path.join(settings.DOCS_DIR, f"{doc_id}.pdf")
         
-        # Save the file
-        with open(pdf_path, "wb") as f:
-            f.write(file_content)
-        
-        # Index into vector store
-        try:
-            n_chunks = self.index_pdf(doc_id, pdf_path)
-        except Exception as e:
-            # Clean up the file if indexing fails
-            if os.path.exists(pdf_path):
-                os.remove(pdf_path)
-            raise ValueError(f"Indexing failed: {e}")
-        
-        # Get page count
-        reader = PdfReader(pdf_path)
-        num_pages = len(reader.pages)
-        
-        # Get vector path
-        vector_path = os.path.join(settings.VECTORS_DIR, doc_id)
-        
-        # Save document info to database
-        try:
-            db_manager.create_document(
-                doc_id=doc_id,
+        if self.use_database_storage:
+            # Store file in database
+            file_id = str(uuid.uuid4())
+            
+            # Store file in database
+            db_manager.store_file(
+                file_id=file_id,
                 filename=filename,
-                pdf_path=pdf_path,
-                vector_path=vector_path,
-                pages=num_pages,
-                chunks_indexed=n_chunks,
+                content_type="application/pdf",
+                file_data=file_content,
                 user_id=user_id
             )
+        else:
+            # Store file locally (legacy)
+            pdf_path = os.path.join(settings.DOCS_DIR, f"{doc_id}.pdf")
+            with open(pdf_path, "wb") as f:
+                f.write(file_content)
+            file_id = None
+        
+        # Get page count first
+        if self.use_database_storage:
+            reader = PdfReader(io.BytesIO(file_content))
+        else:
+            reader = PdfReader(pdf_path)
+        num_pages = len(reader.pages)
+        
+        # Create document record FIRST (required for foreign key constraint)
+        try:
+            if self.use_database_storage:
+                db_manager.create_document(
+                    doc_id=doc_id,
+                    filename=filename,
+                    file_id=file_id,
+                    pages=num_pages,
+                    chunks_indexed=0,  # Will be updated after indexing
+                    user_id=user_id
+                )
+            else:
+                # Legacy file storage
+                vector_path = os.path.join(settings.VECTORS_DIR, doc_id)
+                db_manager.create_document(
+                    doc_id=doc_id,
+                    filename=filename,
+                    file_id="",
+                    pages=num_pages,
+                    chunks_indexed=0,  # Will be updated after indexing
+                    user_id=user_id,
+                    pdf_path=pdf_path,
+                    vector_path=vector_path
+                )
         except Exception as e:
-            # Clean up files if database save fails
-            if os.path.exists(pdf_path):
-                os.remove(pdf_path)
-            # Also clean up vector store
-            if os.path.exists(vector_path):
-                import shutil
-                shutil.rmtree(vector_path)
-            raise ValueError(f"Database save failed: {e}")
+            # Clean up file on document creation failure
+            if self.use_database_storage:
+                db_manager.delete_file(file_id)
+            else:
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+            raise ValueError(f"Document creation failed: {e}")
+        
+        # Now index into vector store (document record exists for foreign key)
+        try:
+            if self.use_database_storage:
+                n_chunks = self.index_pdf(doc_id, file_content)
+            else:
+                n_chunks = self.index_pdf(doc_id, pdf_path)
+            
+            # Update document with actual chunk count
+            db_manager.update_document_chunks_indexed(doc_id, n_chunks)
+            
+        except Exception as e:
+            # Clean up on indexing failure
+            if self.use_database_storage:
+                db_manager.delete_file(file_id)
+                db_manager.delete_document(doc_id)
+            else:
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+                vector_path = os.path.join(settings.VECTORS_DIR, doc_id)
+                if os.path.exists(vector_path):
+                    import shutil
+                    shutil.rmtree(vector_path)
+                db_manager.delete_document(doc_id)
+            raise ValueError(f"Indexing failed: {e}")
         
         return {
             "doc_id": doc_id,
@@ -145,37 +375,30 @@ class PDFProcessor:
         if not document:
             raise FileNotFoundError("Document not found")
         
-        # Check if PDF file and vector store still exist
-        pdf_exists = os.path.exists(document.pdf_path)
-        vector_exists = os.path.exists(document.vector_path)
-        
-        if not pdf_exists or not vector_exists:
-            missing_files = []
-            if not pdf_exists:
-                missing_files.append("PDF")
-            if not vector_exists:
-                missing_files.append("vectors")
+        if self.use_database_storage:
+            # For database storage, check if file exists in database
+            file_exists = document.file_id and db_manager.get_file(document.file_id) is not None
             
-            status = f"missing_{'+'.join(missing_files).lower()}"
-            # Update status in database
-            db_manager.update_document_status(doc_id, status)
             return {
                 "doc_id": doc_id,
                 "filename": document.filename,
-                "pdf_path": document.pdf_path,
-                "vector_path": document.vector_path,
+                "file_id": document.file_id,
                 "pages": document.pages,
-                "status": status
+                "chunks_indexed": document.chunks_indexed,
+                "status": document.status,
+                "storage_type": "database"
             }
-        
-        return {
-            "doc_id": doc_id,
-            "filename": document.filename,
-            "pdf_path": document.pdf_path,
-            "vector_path": document.vector_path,
-            "pages": document.pages,
-            "status": document.status
-        }
+        else:
+            # Legacy file storage - would need pdf_path and vector_path
+            # This is for backward compatibility with old Document structure
+            return {
+                "doc_id": doc_id,
+                "filename": document.filename,
+                "pages": document.pages,
+                "chunks_indexed": document.chunks_indexed,
+                "status": document.status,
+                "storage_type": "filesystem"
+            }
     
     def list_documents(self, user_id: int = None) -> dict:
         """List all documents in the database"""
@@ -184,13 +407,11 @@ class PDFProcessor:
         else:
             documents = db_manager.get_all_documents()
         
-        # Convert to dictionary format and add file existence check
+        # Convert to dictionary format
         result = {}
         for doc in documents:
             doc_info = {
                 "filename": doc.filename,
-                "pdf_path": doc.pdf_path,
-                "vector_path": doc.vector_path,
                 "pages": doc.pages,
                 "chunks_indexed": doc.chunks_indexed,
                 "status": doc.status,
@@ -199,21 +420,13 @@ class PDFProcessor:
                 "updated_at": doc.updated_at.isoformat() if doc.updated_at else None
             }
             
-            # Check if PDF file and vector store still exist
-            pdf_exists = os.path.exists(doc.pdf_path)
-            vector_exists = os.path.exists(doc.vector_path)
-            
-            if not pdf_exists or not vector_exists:
-                missing_files = []
-                if not pdf_exists:
-                    missing_files.append("PDF")
-                if not vector_exists:
-                    missing_files.append("vectors")
-                
-                new_status = f"missing_{'+'.join(missing_files).lower()}"
-                if doc.status != new_status:
-                    db_manager.update_document_status(doc.doc_id, new_status)
-                doc_info["status"] = new_status
+            if self.use_database_storage:
+                # For database storage, add file_id and storage type
+                doc_info["file_id"] = doc.file_id
+                doc_info["storage_type"] = "database"
+            else:
+                # For legacy file storage, would need to check file existence
+                doc_info["storage_type"] = "filesystem"
             
             result[doc.doc_id] = doc_info
         
@@ -226,30 +439,49 @@ class PDFProcessor:
         if not document:
             raise FileNotFoundError("Document not found")
         
-        # Check if PDF file exists
-        if not os.path.exists(document.pdf_path):
-            db_manager.update_document_status(doc_id, "missing_pdf")
-            raise FileNotFoundError("PDF file not found")
-        
-        # Check if vector store exists
-        if not os.path.exists(document.vector_path):
-            db_manager.update_document_status(doc_id, "missing_vectors")
-            raise FileNotFoundError("Vector store not found")
-        
         try:
-            vs = self.load_vectorstore(doc_id)
-            docs = vs.similarity_search(question, k=int(k))
-            
-            return {
-                "doc_id": doc_id,
-                "question": question,
-                "matches": [
-                    {
-                        "page": d.metadata.get("page"),
-                        "text": d.page_content
-                    } for d in docs
-                ]
-            }
+            if self.use_database_storage:
+                # Use database vector storage
+                results = self.query_document_vectors(doc_id, question, k)
+                
+                return {
+                    "doc_id": doc_id,
+                    "question": question,
+                    "matches": [
+                        {
+                            "page": result.get("page"),
+                            "text": result.get("text")
+                        } for result in results
+                    ]
+                }
+            else:
+                # Use legacy file storage - need to get paths from document info
+                doc_info = self.get_document_info(doc_id)
+                pdf_path = doc_info.get("pdf_path")
+                vector_path = doc_info.get("vector_path")
+                
+                if not pdf_path or not os.path.exists(pdf_path):
+                    db_manager.update_document_status(doc_id, "missing_pdf")
+                    raise FileNotFoundError("PDF file not found")
+                
+                # Check if vector store exists
+                if not vector_path or not os.path.exists(vector_path):
+                    db_manager.update_document_status(doc_id, "missing_vectors")
+                    raise FileNotFoundError("Vector store not found")
+                
+                vs = self.load_vectorstore(doc_id)
+                docs = vs.similarity_search(question, k=int(k))
+                
+                return {
+                    "doc_id": doc_id,
+                    "question": question,
+                    "matches": [
+                        {
+                            "page": d.metadata.get("page"),
+                            "text": d.page_content
+                        } for d in docs
+                    ]
+                }
         except Exception as e:
             raise ValueError(f"Query failed: {str(e)}")
     
@@ -260,15 +492,24 @@ class PDFProcessor:
         if not document:
             raise FileNotFoundError("Document not found")
         
-        # Check if PDF file exists
-        if not os.path.exists(document.pdf_path):
-            db_manager.update_document_status(doc_id, "missing_pdf")
-            raise FileNotFoundError("PDF file not found")
+        # Get document paths from document info (handles both storage types)
+        doc_info = self.get_document_info(doc_id)
         
-        # Check if vector store exists
-        if not os.path.exists(document.vector_path):
-            db_manager.update_document_status(doc_id, "missing_vectors")
-            raise FileNotFoundError("Vector store not found")
+        if self.use_database_storage:
+            # For database storage, we don't need to check file paths
+            pass
+        else:
+            # For legacy file storage, check if files exist
+            pdf_path = doc_info.get("pdf_path")
+            vector_path = doc_info.get("vector_path")
+            
+            if not pdf_path or not os.path.exists(pdf_path):
+                db_manager.update_document_status(doc_id, "missing_pdf")
+                raise FileNotFoundError("PDF file not found")
+            
+            if not vector_path or not os.path.exists(vector_path):
+                db_manager.update_document_status(doc_id, "missing_vectors")
+                raise FileNotFoundError("Vector store not found")
         
         try:
             vs = self.load_vectorstore(doc_id)
@@ -361,24 +602,34 @@ class PDFProcessor:
         if not document:
             return False
         
-        # Delete PDF file
-        try:
-            if os.path.exists(document.pdf_path):
-                os.remove(document.pdf_path)
-                print(f"Deleted PDF file: {document.pdf_path}")
-        except Exception as e:
-            print(f"Error deleting PDF file {document.pdf_path}: {e}")
-            success = False
-        
-        # Delete vector store directory
-        try:
-            if os.path.exists(document.vector_path):
-                import shutil
-                shutil.rmtree(document.vector_path)
-                print(f"Deleted vector store: {document.vector_path}")
-        except Exception as e:
-            print(f"Error deleting vector store {document.vector_path}: {e}")
-            success = False
+        # Handle file deletion based on storage type
+        if self.use_database_storage:
+            # For database storage, files are stored in database, no filesystem cleanup needed
+            print(f"Document {doc_id} uses database storage, no filesystem cleanup needed")
+        else:
+            # For legacy file storage, delete files from filesystem
+            doc_info = self.get_document_info(doc_id)
+            pdf_path = doc_info.get("pdf_path")
+            vector_path = doc_info.get("vector_path")
+            
+            # Delete PDF file
+            try:
+                if pdf_path and os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+                    print(f"Deleted PDF file: {pdf_path}")
+            except Exception as e:
+                print(f"Error deleting PDF file {pdf_path}: {e}")
+                success = False
+            
+            # Delete vector store directory
+            try:
+                if vector_path and os.path.exists(vector_path):
+                    import shutil
+                    shutil.rmtree(vector_path)
+                    print(f"Deleted vector store: {vector_path}")
+            except Exception as e:
+                print(f"Error deleting vector store {vector_path}: {e}")
+                success = False
         
         # Delete from database
         try:

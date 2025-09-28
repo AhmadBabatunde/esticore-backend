@@ -15,6 +15,7 @@ from modules.pdf_processing.service import pdf_processor
 from modules.database import db_manager
 from modules.agent import agent_workflow
 from modules.projects.service import project_service
+from modules.session import session_manager, context_resolver
 
 def extract_manual_suggestions(text: str) -> list:
     """Extract manually formatted suggestions from the response text."""
@@ -61,7 +62,23 @@ async def unified_agent(
     except FileNotFoundError:
         raise HTTPException(404, detail="Document not found")
     
-    pdf_path = doc_info["pdf_path"]
+    # Handle different storage types
+    if doc_info.get("storage_type") == "database":
+        # For database storage, we need to get the PDF content from the database
+        try:
+            pdf_content = pdf_processor.get_document_content(doc_id)
+            # Create a temporary file for processing
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_file:
+                temp_file.write(pdf_content)
+                pdf_path = temp_file.name
+        except Exception as e:
+            raise HTTPException(500, detail=f"Failed to retrieve document content: {str(e)}")
+    else:
+        # For legacy file storage
+        pdf_path = doc_info.get("pdf_path")
+        if not pdf_path:
+            raise HTTPException(404, detail="Document file path not found")
     
     # Extract page number from instruction or default to 1
     page_number = 1
@@ -69,25 +86,46 @@ async def unified_agent(
     if page_match:
         page_number = int(page_match.group(1))
     
-    # Get or create session for continuity
-    session_id = agent_workflow.get_or_create_chat_session(session_id)
+    # Resolve context for session management
+    context_data = {'doc_id': doc_id}
+    context_type, context_id = context_resolver.resolve_context(context_data)
     
-    # Add user message to chat history
-    agent_workflow.add_chat_message(session_id, "user", user_instruction)
-    db_manager.add_chat_message(user_id, session_id, "user", user_instruction)
+    # Validate context access
+    context_resolver.validate_context_access_with_exception(user_id, context_type, context_id)
+    
+    # Get or create context-aware session
+    if session_id:
+        # Validate existing session access
+        if not session_manager.validate_session_access(session_id, user_id):
+            # Create new session if access validation fails
+            session_id = session_manager.get_or_create_session(user_id, context_type, context_id)
+        else:
+            # Update activity for existing session
+            session_manager.update_session_activity(session_id)
+    else:
+        # Create new session with context
+        session_id = session_manager.get_or_create_session(user_id, context_type, context_id)
+    
+    # Add user message to chat history with context
+    session_manager.add_message_to_session(session_id, user_id, "user", user_instruction)
     
     # Generate unique output path for potential annotations
     output_filename = f"{doc_id}_page_{page_number}_{uuid.uuid4().hex[:8]}_unified.pdf"
-    output_pdf_path = os.path.join(settings.OUTPUT_DIR, output_filename)
     
-    # Ensure output directory exists
-    os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
+    # Handle case where OUTPUT_DIR is None (database storage)
+    if settings.OUTPUT_DIR is None:
+        import tempfile
+        output_pdf_path = os.path.join(tempfile.gettempdir(), output_filename)
+    else:
+        output_pdf_path = os.path.join(settings.OUTPUT_DIR, output_filename)
+        # Ensure output directory exists
+        os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
     
     # Get recent chat context
-    chat_history = agent_workflow.get_chat_history(session_id)
+    chat_history = agent_workflow.get_chat_history(session_id, user_id, limit=10)
     recent_context = ""
-    if len(chat_history) > 2:  # If there's previous conversation (more than current message)
-        recent_messages = chat_history[-6:-1]  # Last few exchanges, excluding current
+    if len(chat_history) > 1:  # If there's previous conversation (more than current message)
+        recent_messages = chat_history[-6:]  # Last few exchanges
         recent_context = "\n\nRecent conversation context:\n"
         for msg in recent_messages:
             recent_context += f"{msg['role']}: {msg['content']}\n"
@@ -116,6 +154,11 @@ Optimized Instructions for AI Agent:
 3. FOR ANNOTATION/HIGHLIGHTING requests:
    - Follow the standard annotation workflow:
    - Load PDF → Convert to image → Detect objects → Apply annotation → Save PDF
+   - When the user requests to annotate specific items (e.g., "highlight all doors", "circle windows"):
+     * Use the detect_floor_plan_objects tool to get all objects
+     * Use the verify_detections tool to check if the requested object type exists
+     * Use the appropriate annotation tool with the filter_condition parameter to target only those specific items
+     * ALWAYS call save_annotated_image_as_pdf_page at the end
 
 4. PERFORMANCE PRIORITY:
    - Choose the fastest tool that can adequately answer the question
@@ -140,18 +183,47 @@ Please proceed with the most efficient approach for the user's request.
         final_msg = final_state["messages"][-1].content
         
         # Save assistant response to chat history
-        agent_workflow.add_chat_message(session_id, "assistant", final_msg)
-        db_manager.add_chat_message(user_id, session_id, "assistant", final_msg)
+        session_manager.add_message_to_session(session_id, user_id, "assistant", final_msg)
         
         # Check if annotation was performed (PDF file created)
+        output_id = None
         if os.path.exists(output_pdf_path):
             print(f"DEBUG: Annotation completed. PDF file created at: {output_pdf_path}")
             
-            # Add cleanup task
-            background_tasks.add_task(delete_file_after_delay, output_pdf_path, settings.CHAT_FILE_DELETE_DELAY)
+            # If using database storage, move the file to database
+            if pdf_processor.use_database_storage:
+                try:
+                    # Read the generated file
+                    with open(output_pdf_path, 'rb') as f:
+                        output_data = f.read()
+                    
+                    # Store in database
+                    output_id = pdf_processor.store_generated_output(
+                        output_data=output_data,
+                        filename=output_filename,
+                        source_doc_id=doc_id,
+                        user_id=user_id,
+                        metadata={
+                            "type": "unified_annotation",
+                            "page_number": page_number,
+                            "session_id": session_id
+                        }
+                    )
+                    
+                    # Remove local file
+                    os.remove(output_pdf_path)
+                    print(f"DEBUG: Moved annotation to database with output_id: {output_id}")
+                    
+                except Exception as e:
+                    print(f"DEBUG: Error moving annotation to database: {e}")
+                    # Fall back to file cleanup
+                    background_tasks.add_task(delete_file_after_delay, output_pdf_path, settings.CHAT_FILE_DELETE_DELAY)
+            else:
+                # Add cleanup task for file storage
+                background_tasks.add_task(delete_file_after_delay, output_pdf_path, settings.CHAT_FILE_DELETE_DELAY)
             
-            # Return JSON response with annotation details and tracking ID
-            return JSONResponse(content={
+            # Return JSON response with annotation details
+            response_data = {
                 "response": final_msg,
                 "session_id": session_id,
                 "doc_id": doc_id,
@@ -159,9 +231,17 @@ Please proceed with the most efficient approach for the user's request.
                 "type": "annotation",
                 "annotation_status": "completed",
                 "annotated_file_id": output_filename,
-                "annotated_file_path": output_pdf_path,
                 "message": "Annotation completed successfully"
-            })
+            }
+            
+            # Add appropriate file reference
+            if output_id:
+                response_data["output_id"] = output_id
+                response_data["download_url"] = f"/download/output/{output_id}"
+            else:
+                response_data["annotated_file_path"] = output_pdf_path
+            
+            return JSONResponse(content=response_data)
         else:
             print(f"DEBUG: No annotation file created. Returning information response.")
             
@@ -262,8 +342,7 @@ Please proceed with the most efficient approach for the user's request.
         print(f"DEBUG: Exception occurred in unified agent: {str(e)}")
         
         # Save error to chat history
-        agent_workflow.add_chat_message(session_id, "assistant", error_msg)
-        db_manager.add_chat_message(user_id, session_id, "assistant", error_msg)
+        session_manager.add_message_to_session(session_id, user_id, "assistant", error_msg)
         
         return JSONResponse(
             content={
@@ -274,6 +353,15 @@ Please proceed with the most efficient approach for the user's request.
             },
             status_code=500
         )
+    finally:
+        # Clean up temporary PDF file if it was created for database storage
+        if doc_info.get("storage_type") == "database" and 'pdf_path' in locals():
+            try:
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+                    print(f"DEBUG: Cleaned up temporary PDF file: {pdf_path}")
+            except Exception as e:
+                print(f"DEBUG: Error cleaning up temporary PDF file: {e}")
 
 @router.get("/chat/history")
 async def get_chat_history(user_id: int, session_id: str = None, limit: int = 50):
@@ -367,7 +455,23 @@ async def unified_agent_for_project(
     except FileNotFoundError:
         raise HTTPException(404, detail="Document not found")
     
-    pdf_path = doc_info["pdf_path"]
+    # Handle different storage types
+    if doc_info.get("storage_type") == "database":
+        # For database storage, we need to get the PDF content from the database
+        try:
+            pdf_content = pdf_processor.get_document_content(final_doc_id)
+            # Create a temporary file for processing
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_file:
+                temp_file.write(pdf_content)
+                pdf_path = temp_file.name
+        except Exception as e:
+            raise HTTPException(500, detail=f"Failed to retrieve document content: {str(e)}")
+    else:
+        # For legacy file storage
+        pdf_path = doc_info.get("pdf_path")
+        if not pdf_path:
+            raise HTTPException(404, detail="Document file path not found")
     
     # Extract page number from instruction or default to 1
     page_number = 1
@@ -375,25 +479,46 @@ async def unified_agent_for_project(
     if page_match:
         page_number = int(page_match.group(1))
     
-    # Get or create session for continuity
-    session_id = agent_workflow.get_or_create_chat_session(session_id)
+    # Resolve context for session management (project context)
+    context_data = {'project_id': project_id, 'doc_id': final_doc_id}
+    context_type, context_id = context_resolver.resolve_context(context_data)
     
-    # Add user message to chat history
-    agent_workflow.add_chat_message(session_id, "user", user_instruction)
-    db_manager.add_chat_message(user_id, session_id, "user", user_instruction)
+    # Validate context access
+    context_resolver.validate_context_access_with_exception(user_id, context_type, context_id)
+    
+    # Get or create context-aware session
+    if session_id:
+        # Validate existing session access
+        if not session_manager.validate_session_access(session_id, user_id):
+            # Create new session if access validation fails
+            session_id = session_manager.get_or_create_session(user_id, context_type, context_id)
+        else:
+            # Update activity for existing session
+            session_manager.update_session_activity(session_id)
+    else:
+        # Create new session with context
+        session_id = session_manager.get_or_create_session(user_id, context_type, context_id)
+    
+    # Add user message to chat history with context
+    session_manager.add_message_to_session(session_id, user_id, "user", user_instruction)
     
     # Generate unique output path for potential annotations
     output_filename = f"{project_id}_{final_doc_id}_page_{page_number}_{uuid.uuid4().hex[:8]}_project.pdf"
-    output_pdf_path = os.path.join(settings.OUTPUT_DIR, output_filename)
     
-    # Ensure output directory exists
-    os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
+    # Handle case where OUTPUT_DIR is None (database storage)
+    if settings.OUTPUT_DIR is None:
+        import tempfile
+        output_pdf_path = os.path.join(tempfile.gettempdir(), output_filename)
+    else:
+        output_pdf_path = os.path.join(settings.OUTPUT_DIR, output_filename)
+        # Ensure output directory exists
+        os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
     
     # Get recent chat context
-    chat_history = agent_workflow.get_chat_history(session_id)
+    chat_history = agent_workflow.get_chat_history(session_id, user_id, limit=10)
     recent_context = ""
-    if len(chat_history) > 2:  # If there's previous conversation (more than current message)
-        recent_messages = chat_history[-6:-1]  # Last few exchanges, excluding current
+    if len(chat_history) > 1:  # If there's previous conversation (more than current message)
+        recent_messages = chat_history[-6:]  # Last few exchanges
         recent_context = "\n\nRecent conversation context:\n"
         for msg in recent_messages:
             recent_context += f"{msg['role']}: {msg['content']}\n"
@@ -419,10 +544,13 @@ Instructions for AI Agent:
    - ALWAYS use answer_question_with_suggestions (not answer_question_using_rag)
    - This function returns structured JSON with answer and suggestions array
    - Do NOT format suggestions manually in text - let the function handle it
-5. If they want to ANNOTATE/HIGHLIGHT/MARK something, follow the annotation workflow:
+5. If they want to ANNOTATE/HIGHLIGHT/MARK something:
    - Load PDF
    - Convert page to image  
    - Detect objects
+   - When the user requests to annotate specific items (e.g., "highlight all doors", "circle windows"):
+     * Use the verify_detections tool to check if the requested object type exists
+     * Use the appropriate annotation tool with the filter_condition parameter to target only those specific items
    - Apply requested annotation
    - Save annotated PDF
 6. Consider project context and conversation history
@@ -446,18 +574,48 @@ Please proceed based on the user's intent.
         final_msg = final_state["messages"][-1].content
         
         # Save assistant response to chat history
-        agent_workflow.add_chat_message(session_id, "assistant", final_msg)
-        db_manager.add_chat_message(user_id, session_id, "assistant", final_msg)
+        session_manager.add_message_to_session(session_id, user_id, "assistant", final_msg)
         
         # Check if annotation was performed (PDF file created)
+        output_id = None
         if os.path.exists(output_pdf_path):
             print(f"DEBUG: Annotation completed. PDF file created at: {output_pdf_path}")
             
-            # Add cleanup task
-            background_tasks.add_task(delete_file_after_delay, output_pdf_path, settings.CHAT_FILE_DELETE_DELAY)
+            # If using database storage, move the file to database
+            if pdf_processor.use_database_storage:
+                try:
+                    # Read the generated file
+                    with open(output_pdf_path, 'rb') as f:
+                        output_data = f.read()
+                    
+                    # Store in database
+                    output_id = pdf_processor.store_generated_output(
+                        output_data=output_data,
+                        filename=output_filename,
+                        source_doc_id=final_doc_id,
+                        user_id=user_id,
+                        metadata={
+                            "type": "project_annotation",
+                            "page_number": page_number,
+                            "project_id": project_id,
+                            "session_id": session_id
+                        }
+                    )
+                    
+                    # Remove local file
+                    os.remove(output_pdf_path)
+                    print(f"DEBUG: Moved project annotation to database with output_id: {output_id}")
+                    
+                except Exception as e:
+                    print(f"DEBUG: Error moving project annotation to database: {e}")
+                    # Fall back to file cleanup
+                    background_tasks.add_task(delete_file_after_delay, output_pdf_path, settings.CHAT_FILE_DELETE_DELAY)
+            else:
+                # Add cleanup task for file storage
+                background_tasks.add_task(delete_file_after_delay, output_pdf_path, settings.CHAT_FILE_DELETE_DELAY)
             
-            # Return JSON response with annotation details and tracking ID
-            return JSONResponse(content={
+            # Return JSON response with annotation details
+            response_data = {
                 "response": final_msg,
                 "session_id": session_id,
                 "project_id": project_id,
@@ -466,9 +624,17 @@ Please proceed based on the user's intent.
                 "type": "annotation",
                 "annotation_status": "completed",
                 "annotated_file_id": output_filename,
-                "annotated_file_path": output_pdf_path,
                 "message": "Annotation completed successfully"
-            })
+            }
+            
+            # Add appropriate file reference
+            if output_id:
+                response_data["output_id"] = output_id
+                response_data["download_url"] = f"/download/output/{output_id}"
+            else:
+                response_data["annotated_file_path"] = output_pdf_path
+            
+            return JSONResponse(content=response_data)
         else:
             print(f"DEBUG: No annotation file created. Returning information response.")
             
@@ -574,8 +740,7 @@ Please proceed based on the user's intent.
         print(f"DEBUG: Exception occurred in project agent: {str(e)}")
         
         # Save error to chat history
-        agent_workflow.add_chat_message(session_id, "assistant", error_msg)
-        db_manager.add_chat_message(user_id, session_id, "assistant", error_msg)
+        session_manager.add_message_to_session(session_id, user_id, "assistant", error_msg)
         
         return JSONResponse(
             content={
@@ -586,4 +751,13 @@ Please proceed based on the user's intent.
             },
             status_code=500
         )
+    finally:
+        # Clean up temporary PDF file if it was created for database storage
+        if doc_info.get("storage_type") == "database" and 'pdf_path' in locals():
+            try:
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+                    print(f"DEBUG: Cleaned up temporary PDF file: {pdf_path}")
+            except Exception as e:
+                print(f"DEBUG: Error cleaning up temporary PDF file: {e}")
 

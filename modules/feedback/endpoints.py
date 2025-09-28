@@ -7,7 +7,7 @@ from typing import Optional
 
 from modules.feedback.service import feedback_service as FeedbackService
 from modules.auth.service import auth_service
-from modules.feedback.models import FeedbackType
+from modules.admin.models import FeedbackType
 
 router = APIRouter(prefix="/feedback", tags=["feedback"])
 security = HTTPBearer()

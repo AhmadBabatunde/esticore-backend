@@ -16,6 +16,7 @@ langchain-openai
 langchain-community
 langgraph
 langchain-tavily
+tiktoken
 
 # PDF and image processing
 PyPDF2
@@ -30,6 +31,7 @@ faiss-cpu
 # Database drivers
 PyMySQL
 mysql-connector-python
+psycopg2-binary
 
 # Environment variables
 python-dotenv
@@ -46,3 +48,4 @@ python-jose[cryptography]
 python-multipart
 jwt
 langchain_tavily
+

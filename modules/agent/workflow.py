@@ -16,7 +16,42 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
 
 from modules.config.settings import settings
-from modules.agent.tools import ALL_TOOLS
+from modules.agent.tools import (
+    load_pdf_for_floorplan,
+    convert_pdf_page_to_image,
+    detect_floor_plan_objects,
+    verify_detections,
+    internet_search,
+    apply_highlight_annotation,
+    apply_circle_annotation,
+    apply_rectangle_annotation,
+    apply_count_annotation,
+    apply_arrow_annotation,
+    save_annotated_image_as_pdf_page,
+    answer_question_using_rag,
+    answer_question_with_suggestions,
+    quick_page_analysis
+)
+
+# List of all available tools
+ALL_TOOLS = [
+    load_pdf_for_floorplan,
+    convert_pdf_page_to_image,
+    detect_floor_plan_objects,
+    verify_detections,
+    internet_search,
+    apply_highlight_annotation,
+    apply_circle_annotation,
+    apply_rectangle_annotation,
+    apply_count_annotation,
+    apply_arrow_annotation,
+    save_annotated_image_as_pdf_page,
+    answer_question_using_rag,
+    answer_question_with_suggestions,
+    quick_page_analysis
+]
+from modules.session import session_manager, context_resolver
+from modules.database.models import db_manager
 
 # ==============================
 # Memory Management
@@ -57,67 +92,15 @@ class SimpleMemory:
         self.chat_memory.clear()
 
 # ==============================
-# Chat Session Storage
+# Enhanced Session Management
 # ==============================
 
 @dataclass
 class ChatMessage:
-    """Chat message data structure"""
+    """Chat message data structure (kept for backward compatibility)"""
     role: str
     content: str
     timestamp: datetime = field(default_factory=datetime.now)
-
-class ChatSession:
-    """Simple chat session storage"""
-    def __init__(self):
-        self.sessions = {}
-    
-    def create_session(self, session_id=None):
-        if session_id is None:
-            session_id = str(uuid.uuid4())
-        self.sessions[session_id] = {
-            "messages": [],
-            "created_at": datetime.now(),
-            "last_activity": datetime.now()
-        }
-        return session_id
-    
-    def add_message(self, session_id, role, content):
-        if session_id not in self.sessions:
-            self.create_session(session_id)
-        
-        message = {
-            "role": role,
-            "content": content,
-            "timestamp": datetime.now()
-        }
-        
-        self.sessions[session_id]["messages"].append(message)
-        self.sessions[session_id]["last_activity"] = datetime.now()
-        
-        # Keep only the last N messages to prevent memory issues
-        if len(self.sessions[session_id]["messages"]) > settings.CHAT_HISTORY_LIMIT:
-            self.sessions[session_id]["messages"] = self.sessions[session_id]["messages"][-settings.CHAT_HISTORY_LIMIT:]
-    
-    def get_messages(self, session_id):
-        if session_id in self.sessions:
-            return self.sessions[session_id]["messages"]
-        return []
-    
-    def cleanup_old_sessions(self, hours=None):
-        """Remove sessions older than specified hours"""
-        if hours is None:
-            hours = settings.SESSION_CLEANUP_HOURS
-            
-        now = datetime.now()
-        expired_sessions = []
-        
-        for session_id, session_data in self.sessions.items():
-            if (now - session_data["last_activity"]).total_seconds() > hours * 3600:
-                expired_sessions.append(session_id)
-        
-        for session_id in expired_sessions:
-            del self.sessions[session_id]
 
 # ==============================
 # Agent State and Workflow
@@ -133,14 +116,14 @@ class FloorPlanState(MessagesState):
     page_number: int = 1
 
 class AgentWorkflow:
-    """Agent workflow management"""
+    """Agent workflow using LangGraph with proper tool calling"""
     
     def __init__(self):
         self.memory = SimpleMemory()
-        self.chat_sessions = ChatSession()
+        self.session_manager = session_manager
+        self.context_resolver = context_resolver
         
-        # Initialize agent
-        self.llm = ChatOpenAI(model="gpt-4o", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+        self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
         self.agent = create_tool_calling_agent(self.llm, ALL_TOOLS, self._create_prompt())
         self.agent_executor = AgentExecutor(agent=self.agent, tools=ALL_TOOLS, verbose=True)
         
@@ -151,7 +134,8 @@ class AgentWorkflow:
     def _create_prompt(self):
         """Create the agent prompt template"""
         return ChatPromptTemplate.from_messages([
-            ("system", """You are an expert Civil Engeneering AI assistant for working with floor plan documents. You can both answer questions about the documents and annotate specific pages.
+            ("system", """
+You are an expert Civil Engineering AI assistant for working with floor plan documents. You can both answer questions about the documents and annotate specific pages.
 
 **Workflow for Annotation Requests:**
 1.  **Load & Validate PDF**: Use `load_pdf_for_floorplan` to check the PDF.
@@ -203,41 +187,34 @@ You have access to:
             return "action" if state["messages"][-1].tool_calls else END
 
         def call_agent(state: FloorPlanState):
-            # Add memory context to the state
-            memory_context = self.memory.load_memory_variables({})
-            
-            # Create a more detailed message that includes state information
+            # Only use the latest user message for agent reasoning
             original_message = state["messages"][-1].content if state["messages"] else ""
-            
+
             # Add state context to help the agent understand what it needs to do
             context_message = f"""
             CURRENT STATE CONTEXT:
             - PDF Path: {state.get('pdf_path', 'Not set')}
             - Page Number: {state.get('page_number', 'Not set')}
             - Output Path: {state.get('output_path', 'Not set')}
-            
+
             USER REQUEST: {original_message}
-            
+
             IMPORTANT: If this is an annotation request, you MUST call save_annotated_image_as_pdf_page at the end with:
             - image_path: the temporary image path from convert_pdf_page_to_image
             - original_pdf_path: {state.get('pdf_path', '')}
             - page_number: {state.get('page_number', 1)}
             - output_pdf_path: {state.get('output_path', '')}
             """
-            
-            # Update the state with the context message
+
+            # Only pass the latest message and context to the agent
             state_with_context = state.copy()
-            state_with_context["messages"] = state["messages"][:-1] + [HumanMessage(content=context_message)]
-            
-            if memory_context and "history" in memory_context and memory_context["history"]:
-                # Add memory to the conversation
-                state_with_context["messages"].append(HumanMessage(content=f"Memory context: {memory_context['history']}"))
-            
+            state_with_context["messages"] = [HumanMessage(content=context_message)]
+
             response = self.agent_executor.invoke(state_with_context)
-            
-            # Save to memory
+
+            # Save to memory (for logging, not for agent reasoning)
             self.memory.save_context({"input": original_message}, {"output": response["output"]})
-            
+
             return {"messages": [AIMessage(content=response["output"])]}
 
         workflow = StateGraph(FloorPlanState)
@@ -246,36 +223,136 @@ You have access to:
         workflow.set_entry_point("agent")
         workflow.add_conditional_edges("agent", should_continue, {"action": "action", END: END})
         workflow.add_edge("action", "agent")
-        
+
         return workflow
+    
+    def _clean_response(self, response: str) -> str:
+        """Clean the response to remove download links and improve annotation messages"""
+        import re
+        
+        # Remove download links
+        response = re.sub(r'\[Download.*?\]\(.*?\)', '', response)
+        response = re.sub(r'You can download.*?using the link below:?\s*', '', response)
+        response = re.sub(r'sandbox:/[^\s\)]*', '', response)
+        
+        # Clean up annotation success messages
+        if 'successfully highlighted' in response.lower():
+            # Extract page number if present
+            page_match = re.search(r'page (\d+)', response.lower())
+            page_num = page_match.group(1) if page_match else "the requested page"
+            response = f"The objects on page {page_num} have been successfully highlighted."
+        
+        elif 'successfully circled' in response.lower():
+            page_match = re.search(r'page (\d+)', response.lower())
+            page_num = page_match.group(1) if page_match else "the requested page"
+            response = f"The objects on page {page_num} have been successfully circled."
+        
+        elif 'successfully annotated' in response.lower():
+            page_match = re.search(r'page (\d+)', response.lower())
+            page_num = page_match.group(1) if page_match else "the requested page"
+            response = f"The objects on page {page_num} have been successfully annotated."
+        
+        # Remove extra whitespace and clean up
+        response = re.sub(r'\n\s*\n', '\n\n', response)
+        response = response.strip()
+        
+        return response
     
     def process_request(self, initial_state: Dict[str, Any]) -> Dict[str, Any]:
         """Process a request through the agent workflow"""
         try:
-            final_state = self.compiled_graph.invoke(initial_state, {"recursion_limit": settings.RECURSION_LIMIT})
-            return final_state
+            # Detect intent from initial_state['messages'][-1].content
+            user_message = initial_state["messages"][-1].content if initial_state.get("messages") else ""
+            intent = None
+            if any(x in user_message.lower() for x in ["highlight", "circle", "rectangle", "count", "arrow", "annotate"]):
+                intent = "annotation"
+            elif any(x in user_message.lower() for x in ["latest", "current", "recent", "news", "trend", "regulation"]):
+                intent = "internet_search"
+            else:
+                intent = "question"
+
+            # Route to correct tool chain
+            if intent == "annotation":
+                # Annotation workflow: always follow annotation tool chain and save step
+                final_state = self.compiled_graph.invoke(initial_state, {"recursion_limit": settings.RECURSION_LIMIT})
+                return final_state
+            elif intent == "internet_search":
+                # Internet search workflow: use internet_search tool only
+                # (This assumes the agent will call the correct tool based on prompt)
+                final_state = self.compiled_graph.invoke(initial_state, {"recursion_limit": settings.RECURSION_LIMIT})
+                return final_state
+            else:
+                # Question answering workflow: use answer_question_with_suggestions, fallback to answer_question_using_rag
+                final_state = self.compiled_graph.invoke(initial_state, {"recursion_limit": settings.RECURSION_LIMIT})
+                return final_state
         except Exception as e:
             raise Exception(f"Agent workflow error: {str(e)}")
     
-    def get_or_create_chat_session(self, session_id: str = None) -> str:
-        """Get or create a chat session"""
-        if random.random() < 0.1:  # 10% chance on each request
-            self.chat_sessions.cleanup_old_sessions()
+    def get_or_create_chat_session(self, session_id: str = None, user_id: int = None, context_type: str = 'GENERAL', context_id: str = None) -> str:
+        """Get or create a chat session with context support"""
+        # Trigger cleanup occasionally
+        if random.random() < settings.SESSION_ACTIVITY_UPDATE_PROBABILITY:
+            self.session_manager.cleanup_expired_sessions()
         
-        if not session_id:
-            session_id = self.chat_sessions.create_session()
-        elif session_id not in self.chat_sessions.sessions:
-            self.chat_sessions.create_session(session_id)
+        if session_id:
+            # Validate existing session
+            session = self.session_manager.get_session_by_id(session_id)
+            if session and session.is_active:
+                # Update activity and return existing session
+                self.session_manager.update_session_activity(session_id)
+                return session_id
         
-        return session_id
+        # Create new session if user_id is provided
+        if user_id is not None:
+            return self.session_manager.get_or_create_session(user_id, context_type, context_id)
+        
+        # Fallback: create a simple UUID for backward compatibility
+        return str(uuid.uuid4())
     
-    def add_chat_message(self, session_id: str, role: str, content: str):
-        """Add a message to chat session"""
-        self.chat_sessions.add_message(session_id, role, content)
+    def get_or_create_context_session(self, user_id: int, context_data: Dict[str, Any]) -> str:
+        """Get or create a session based on context data"""
+        context_type, context_id = self.context_resolver.resolve_context(context_data)
+        return self.session_manager.get_or_create_session(user_id, context_type, context_id)
     
-    def get_chat_history(self, session_id: str) -> List[Dict]:
+    def add_chat_message(self, session_id: str, role: str, content: str, user_id: int = None):
+        """Add a message to chat session with enhanced context support"""
+        if user_id is not None:
+            # Use the new session manager to add message with context
+            success = self.session_manager.add_message_to_session(session_id, user_id, role, content)
+            if not success:
+                print(f"Warning: Failed to add message to session {session_id}")
+        else:
+            # Fallback to old memory system for backward compatibility
+            if hasattr(self, 'chat_sessions'):
+                self.chat_sessions.add_message(session_id, role, content)
+    
+    def get_chat_history(self, session_id: str, user_id: int = None, limit: int = 50) -> List[Dict]:
         """Get chat history for a session"""
-        return self.chat_sessions.get_messages(session_id)
+        if user_id is not None:
+            # Use database-backed history
+            messages = db_manager.get_chat_history(user_id, session_id, limit)
+            # Convert to the expected format
+            return [
+                {
+                    "role": msg.role,
+                    "content": msg.message,
+                    "timestamp": msg.timestamp
+                }
+                for msg in reversed(messages)  # Reverse to get chronological order
+            ]
+        else:
+            # Fallback to old memory system for backward compatibility
+            if hasattr(self, 'chat_sessions'):
+                return self.chat_sessions.get_messages(session_id)
+            return []
+    
+    def get_session_context(self, session_id: str) -> tuple:
+        """Get the context type and ID for a session"""
+        return self.session_manager.get_session_context(session_id)
+    
+    def validate_session_access(self, session_id: str, user_id: int) -> bool:
+        """Validate that a user has access to a session"""
+        return self.session_manager.validate_session_access(session_id, user_id)
 
 # Global agent workflow instance
 agent_workflow = AgentWorkflow()

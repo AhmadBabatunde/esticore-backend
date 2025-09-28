@@ -134,11 +134,17 @@ class ProjectService:
             doc_info = {
                 "doc_id": doc.doc_id,
                 "filename": doc.filename,
-                "pdf_path": doc.pdf_path,
-                "vector_path": doc.vector_path,
                 "pages": doc.pages,
                 "status": doc.status
             }
+            
+            # Add storage-specific information
+            if hasattr(doc, 'file_id') and doc.file_id:
+                doc_info["file_id"] = doc.file_id
+                doc_info["storage_type"] = "database"
+            else:
+                doc_info["storage_type"] = "filesystem"
+            
             document_info.append(doc_info)
         
         return {
@@ -165,10 +171,10 @@ class ProjectService:
                 doc_info = {
                     "doc_id": doc.doc_id,
                     "filename": doc.filename,
-                    "pdf_path": doc.pdf_path,
-                    "vector_path": doc.vector_path,
                     "pages": doc.pages,
-                    "status": doc.status
+                    "status": doc.status,
+                    "file_id": doc.file_id if hasattr(doc, 'file_id') else None,
+                    "storage_type": "database" if hasattr(doc, 'file_id') and doc.file_id else "filesystem"
                 }
                 document_info.append(doc_info)
             
