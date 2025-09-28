@@ -5,7 +5,7 @@ from typing import Dict, Any, List
 from fastapi import HTTPException
 
 from modules.database import db_manager
-from modules.feedback.models import FeedbackType
+from modules.admin.models import FeedbackType
 
 class FeedbackService:
     """Feedback service class"""

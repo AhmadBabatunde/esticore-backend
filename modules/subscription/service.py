@@ -8,7 +8,7 @@ from fastapi import HTTPException
 
 from modules.config.settings import settings
 from modules.database import db_manager
-from modules.subscription.models import SubscriptionInterval
+from modules.admin.models import SubscriptionInterval
 
 class SubscriptionService:
     """Subscription service class"""

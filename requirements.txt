@@ -39,3 +39,10 @@ inference-sdk
 
 # Other utilities
 requests
+
+stripe
+boto3
+python-jose[cryptography]
+python-multipart
+jwt
+langchain_tavily

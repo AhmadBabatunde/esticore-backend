@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Depends, Form
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 
-from modules.feedback.service import feedback_service
+from modules.feedback.service import feedback_service as FeedbackService
 from modules.auth.service import auth_service
 from modules.feedback.models import FeedbackType
 

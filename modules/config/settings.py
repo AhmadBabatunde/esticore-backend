@@ -57,7 +57,21 @@ class Settings:
     DB_NAME = os.getenv('DB_NAME')
     DB_USER = os.getenv('DB_USER')
     DB_PASSWORD = os.getenv('DB_PASSWORD')
-    
+
+
+    STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY')
+    STRIPE_WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET')
+    STRIPE_PUBLISHABLE_KEY = os.getenv('STRIPE_PUBLISHABLE_KEY')
+
+    AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
+    AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
+    AWS_REGION = os.getenv('AWS_REGION')
+    S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
+
+    JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY')
+    BASE_URL = os.getenv('BASE_URL')
+
+
     # Database type selection
     USE_RDS = bool(DB_HOST and DB_NAME and DB_USER and DB_PASSWORD)
     

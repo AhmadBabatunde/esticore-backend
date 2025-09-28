@@ -164,3 +164,5 @@ async def get_dashboard_statistics():
 async def get_subscription_reminders():
     """Get users who need subscription reminders"""
     return admin_service.get_subscription_reminders()
+
+    
