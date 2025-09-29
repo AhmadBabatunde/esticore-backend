@@ -30,7 +30,11 @@ from modules.agent.tools import (
     save_annotated_image_as_pdf_page,
     answer_question_using_rag,
     answer_question_with_suggestions,
-    quick_page_analysis
+    quick_page_analysis,
+    analyze_pdf_page_multimodal,
+    measure_objects,
+    calibrate_scale,
+    analyze_object_proportions
 )
 
 # List of all available tools
@@ -48,7 +52,11 @@ ALL_TOOLS = [
     save_annotated_image_as_pdf_page,
     answer_question_using_rag,
     answer_question_with_suggestions,
-    quick_page_analysis
+    quick_page_analysis,
+    analyze_pdf_page_multimodal,
+    measure_objects,
+    calibrate_scale,
+    analyze_object_proportions
 ]
 from modules.session import session_manager, context_resolver
 from modules.database.models import db_manager
@@ -135,49 +143,106 @@ class AgentWorkflow:
         """Create the agent prompt template"""
         return ChatPromptTemplate.from_messages([
             ("system", """
-You are an expert Civil Engineering AI assistant for working with floor plan documents. You can both answer questions about the documents and annotate specific pages.
+You are an expert Civil Engineering AI assistant for working with floor plan documents. Your role is to analyze user requests and select the SINGLE most appropriate tool to handle each request.
 
-**Workflow for Annotation Requests:**
-1.  **Load & Validate PDF**: Use `load_pdf_for_floorplan` to check the PDF.
-2.  **Convert Specific Page to Image**: Use `convert_pdf_page_to_image` with the specified page number.
-3.  **Detect Objects**: Use `detect_floor_plan_objects` to get a JSON list of all objects and their bounding boxes.
-4.  **Verify Detections (If Needed)**: If the user asks for a specific object type, call `verify_detections` to check if that object type was found.
-5.  **Apply Annotation**: Call the appropriate annotation tool based on the user's request.
-6.  **Save Final PDF**: ALWAYS use `save_annotated_image_as_pdf_page` to save the annotated page and merge it with the original PDF. Use the output_path from the state.
+**TOOL SELECTION GUIDELINES:**
 
-**Workflow for Question Answering:**
-1.  **Answer Questions with Suggestions**: ALWAYS use `answer_question_with_suggestions` to answer questions about the document content and provide related topic suggestions with page numbers. This returns structured JSON.
-2.  **Fallback**: Only use `answer_question_using_rag` if the enhanced function fails.
+1. **MEASUREMENT REQUESTS** - Use detection + measurement (NO ANNOTATION):
+   - "measure [object]", "how wide/tall", "what size", "dimensions of" → detect_floor_plan_objects → measure_objects
+   - "how big is", "size of [object]", "width of", "height of" → detect_floor_plan_objects → measure_objects
+   - "calibrate scale", "set reference" → calibrate_scale
+   - "analyze proportions", "aspect ratio" → analyze_object_proportions
 
-**Internet Search Capability:**
-- When the user asks for up-to-date information or facts that cannot be found in the document (e.g., current market trends, recent news, latest regulations, factual data not in the document), use the `internet_search` tool to retrieve current information.
-- Always cite the sources from the internet search results when providing answers.
+2. **DETECTION REQUESTS** - Use detection tools only:
+   - "what objects are on this page", "detect objects", "find [objects]" → detect_floor_plan_objects
+   - "verify [objects] exist", "check for [objects]" → verify_detections
 
-**Important for Questions**: When answering questions, you MUST use `answer_question_with_suggestions` and return its JSON output directly without modification.
+3. **DOCUMENT QUESTIONS** - Use ONE question answering tool:
+   - General questions → answer_question_with_suggestions
+   - Simple factual questions → answer_question_using_rag
+   - Specific page analysis → quick_page_analysis
 
-**Intent Detection:**
-- If the user asks a question about the document content (e.g., "what's on page 3", "tell me about the kitchen"), use the RAG tool.
-- If the user requests an annotation (e.g., "highlight doors on page 2", "circle all windows"), follow the annotation workflow.
-- If the user asks for current information or facts not contained in the document, use the internet_search tool.
-- If the user's intent is unclear, ask for clarification.
+4. **VISUAL/IMAGE ANALYSIS** - Use image tools:
+   - "describe this page/layout" → analyze_pdf_page_multimodal (PREFERRED for detailed visual analysis)
+   - Basic page conversion → convert_pdf_page_to_image
 
-**Crucial Instructions:**
-- Always determine the user's intent first.
-- For annotation requests, follow the complete sequence INCLUDING the save step.
-- ALWAYS call `save_annotated_image_as_pdf_page` at the end of any annotation workflow.
-- For question answering, use the RAG tool directly.
-- When a user asks to annotate specific items, verify the detections first.
-- Only call one annotation tool per request.
-- The final output for annotation should be a complete PDF with only the specified page annotated.
-- When saving, use the exact output_path provided in the state.
+5. **MULTIMODAL ANALYSIS** - Use analyze_pdf_page_multimodal for:
+   - Detailed layout descriptions
+   - Spatial relationships analysis
+   - Comprehensive visual understanding
+   - Combined text and image analysis
 
-**State Information:**
-You have access to:
-- pdf_path: The path to the original PDF
-- page_number: The specific page to work on
-- output_path: Where to save the final annotated PDF (ALWAYS use this exact path)
+6. **EXTERNAL INFORMATION** - Use search:
+   - Current info/regulations → internet_search
+
+7. **FILE OPERATIONS** - Use file tools:
+   - Load PDF → load_pdf_for_floorplan
+   - Save annotated PDF → save_annotated_image_as_pdf_page
+
+**CRITICAL RULES FOR RESPONSE FORMATTING:**
+- NEVER include download URLs or file paths in responses
+- NEVER use markdown links like [here](file://path) or [Download](path)
+- For annotation completions, simply state: "Annotation completed successfully"
+- For measurement results, provide the numerical values and units clearly
+- For analysis results, provide the findings in clear text
+- Keep responses clean and professional without technical file paths
+
+**CRITICAL RULES FOR MEASUREMENT:**
+- For measurement requests: ONLY use detect_floor_plan_objects → measure_objects
+- NEVER use annotation tools (highlight, circle, rectangle, count, arrow) for measurement requests
+- Measurement workflow: detect → measure → return results (no annotation)
+- If objects are already detected, use measure_objects directly with existing object data
+
+**MEASUREMENT WORKFLOW:**
+1. Use detect_floor_plan_objects to get object detection data
+2. Use measure_objects with the detected objects JSON
+3. Return measurement results without any annotation
+
+**CRITICAL RULES:**
+- Select ONLY ONE tool per user request
+- Choose the tool that most directly addresses the user's need
+- For measurement: detect + measure only, NO ANNOTATION
+- For visual/spatial/layout questions, PREFER analyze_pdf_page_multimodal
+- Do not chain multiple tools unless absolutely necessary for measurement
+- For complex requests, pick the most relevant primary tool
+
+**RESPONSE FORMAT EXAMPLES:**
+✅ CORRECT:
+- "The steel base plate measures 450mm in width and 450mm in height."
+- "Annotation completed successfully. The doors have been highlighted."
+- "I detected 3 windows and 2 doors on this page."
+- "The room layout shows a 5m x 4m living area with two bedrooms."
+
+❌ INCORRECT:
+- "You can download it [here](C:\\Users\\...\\file.pdf)."
+- "Download the annotated file [Download](path/to/file)"
+- "File saved at: C:\\temp\\file.pdf"
+
+**TOOL USAGE EXAMPLES:**
+- "Measure the width of the steel base plate" → detect_floor_plan_objects → measure_objects
+- "How wide is the door?" → detect_floor_plan_objects → measure_objects
+- "What are the dimensions of the window?" → detect_floor_plan_objects → measure_objects
+- "What objects are on this page?" → detect_floor_plan_objects
+- "Verify if there are any steel base plates" → verify_detections
+- "What's on page 3?" → quick_page_analysis  
+- "Describe the layout of page 2" → analyze_pdf_page_multimodal (PREFERRED)
+- "Show me the spatial relationships" → analyze_pdf_page_multimodal
+- "Current building codes" → internet_search
+- "Explain this floor plan visually" → analyze_pdf_page_multimodal
+- "Calibrate the scale using this 2m wall" → calibrate_scale
+- "Analyze the proportions of the rooms" → analyze_object_proportions
+
+**MEASUREMENT-SPECIFIC NOTES:**
+- The measure_objects tool can automatically detect scale using standard object sizes
+- For precise measurements, provide reference_scale parameter if known
+- Steel base plates typically measure 150-600mm in width/height
+- Standard doors are 900mm wide, windows are 1200mm wide
+- The tool provides engineering context for different object types
+- Measurements are based on detection only - no visual annotations are applied
+
+Always provide clean, professional responses without file paths or download links.
 """),
-            MessagesPlaceholder(variable_name="messages"),
+                MessagesPlaceholder(variable_name="messages"),
             MessagesPlaceholder(variable_name="agent_scratchpad"),
         ])
     
@@ -187,7 +252,10 @@ You have access to:
             return "action" if state["messages"][-1].tool_calls else END
 
         def call_agent(state: FloorPlanState):
-            # Only use the latest user message for agent reasoning
+            # Add memory context to the state
+            memory_context = self.memory.load_memory_variables({})
+
+            # Create a more detailed message that includes state information
             original_message = state["messages"][-1].content if state["messages"] else ""
 
             # Add state context to help the agent understand what it needs to do
@@ -206,13 +274,17 @@ You have access to:
             - output_pdf_path: {state.get('output_path', '')}
             """
 
-            # Only pass the latest message and context to the agent
+            # Update the state with the context message
             state_with_context = state.copy()
-            state_with_context["messages"] = [HumanMessage(content=context_message)]
+            state_with_context["messages"] = state["messages"][:-1] + [HumanMessage(content=context_message)]
+
+            if memory_context and "history" in memory_context and memory_context["history"]:
+                # Add memory to the conversation
+                state_with_context["messages"].append(HumanMessage(content=f"Memory context: {memory_context['history']}"))
 
             response = self.agent_executor.invoke(state_with_context)
 
-            # Save to memory (for logging, not for agent reasoning)
+            # Save to memory
             self.memory.save_context({"input": original_message}, {"output": response["output"]})
 
             return {"messages": [AIMessage(content=response["output"])]}
@@ -226,65 +298,25 @@ You have access to:
 
         return workflow
     
-    def _clean_response(self, response: str) -> str:
-        """Clean the response to remove download links and improve annotation messages"""
-        import re
-        
-        # Remove download links
-        response = re.sub(r'\[Download.*?\]\(.*?\)', '', response)
-        response = re.sub(r'You can download.*?using the link below:?\s*', '', response)
-        response = re.sub(r'sandbox:/[^\s\)]*', '', response)
-        
-        # Clean up annotation success messages
-        if 'successfully highlighted' in response.lower():
-            # Extract page number if present
-            page_match = re.search(r'page (\d+)', response.lower())
-            page_num = page_match.group(1) if page_match else "the requested page"
-            response = f"The objects on page {page_num} have been successfully highlighted."
-        
-        elif 'successfully circled' in response.lower():
-            page_match = re.search(r'page (\d+)', response.lower())
-            page_num = page_match.group(1) if page_match else "the requested page"
-            response = f"The objects on page {page_num} have been successfully circled."
-        
-        elif 'successfully annotated' in response.lower():
-            page_match = re.search(r'page (\d+)', response.lower())
-            page_num = page_match.group(1) if page_match else "the requested page"
-            response = f"The objects on page {page_num} have been successfully annotated."
-        
-        # Remove extra whitespace and clean up
-        response = re.sub(r'\n\s*\n', '\n\n', response)
-        response = response.strip()
-        
-        return response
-    
     def process_request(self, initial_state: Dict[str, Any]) -> Dict[str, Any]:
         """Process a request through the agent workflow"""
         try:
-            # Detect intent from initial_state['messages'][-1].content
+            # Enhanced intent detection for generalization
             user_message = initial_state["messages"][-1].content if initial_state.get("messages") else ""
-            intent = None
-            if any(x in user_message.lower() for x in ["highlight", "circle", "rectangle", "count", "arrow", "annotate"]):
+            msg_lower = user_message.lower()
+            if any(x in msg_lower for x in ["highlight", "circle", "rectangle", "count", "arrow", "annotate"]):
                 intent = "annotation"
-            elif any(x in user_message.lower() for x in ["latest", "current", "recent", "news", "trend", "regulation"]):
+            elif any(x in msg_lower for x in ["latest", "current", "recent", "news", "trend", "regulation", "countries", "can i build", "allowed", "permitted", "legal", "law", "code", "standard"]):
                 intent = "internet_search"
+            elif any(x in msg_lower for x in ["describe", "show", "visual", "layout", "diagram", "where", "located", "appearance", "spatial", "look", "see", "view", "display"]):
+                intent = "visual_analysis"
             else:
                 intent = "question"
 
             # Route to correct tool chain
-            if intent == "annotation":
-                # Annotation workflow: always follow annotation tool chain and save step
-                final_state = self.compiled_graph.invoke(initial_state, {"recursion_limit": settings.RECURSION_LIMIT})
-                return final_state
-            elif intent == "internet_search":
-                # Internet search workflow: use internet_search tool only
-                # (This assumes the agent will call the correct tool based on prompt)
-                final_state = self.compiled_graph.invoke(initial_state, {"recursion_limit": settings.RECURSION_LIMIT})
-                return final_state
-            else:
-                # Question answering workflow: use answer_question_with_suggestions, fallback to answer_question_using_rag
-                final_state = self.compiled_graph.invoke(initial_state, {"recursion_limit": settings.RECURSION_LIMIT})
-                return final_state
+            # All routes use the compiled graph, but intent is passed in context for agent prompt
+            final_state = self.compiled_graph.invoke(initial_state, {"recursion_limit": settings.RECURSION_LIMIT, "intent": intent})
+            return final_state
         except Exception as e:
             raise Exception(f"Agent workflow error: {str(e)}")
     

@@ -1039,16 +1039,32 @@ def answer_question_using_rag(doc_id: str, question: str) -> str:
             "most_referenced_page": None
         }
         return json.dumps(fallback_response)
-
+@tool
 def analyze_pdf_page_multimodal(doc_id: str, page_number: int = 1) -> str:
     """Optimized multimodal analysis of a PDF page using both text and visual analysis."""
     try:
         # Get document info to find PDF path
         doc_info = pdf_processor.get_document_info(doc_id)
-        pdf_path = doc_info["pdf_path"]
         
-        if not os.path.exists(pdf_path):
-            return f"Error: PDF file not found at '{pdf_path}'"
+        # Handle different storage types
+        pdf_path = None
+        if doc_info.get("storage_type") == "database":
+            # For database storage, we need to get the PDF content and create a temporary file
+            try:
+                pdf_content = pdf_processor.get_document_content(doc_id)
+                # Create a temporary file for processing
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_file:
+                    temp_file.write(pdf_content)
+                    pdf_path = temp_file.name
+            except Exception as e:
+                return f"Error retrieving document from database: {str(e)}"
+        else:
+            # For file storage
+            pdf_path = doc_info.get("pdf_path")
+        
+        if not pdf_path or not os.path.exists(pdf_path):
+            return f"Error: PDF file not found for document {doc_id}"
             
         # OPTIMIZATION: Use lower DPI for faster processing (200 instead of 300)
         print(f"DEBUG: Converting page {page_number} to image for multimodal analysis (optimized)")
@@ -1101,6 +1117,15 @@ def analyze_pdf_page_multimodal(doc_id: str, page_number: int = 1) -> str:
                 print(f"DEBUG: Cleaned up temporary image: {temp_image_path}")
         except Exception as cleanup_error:
             print(f"DEBUG: Could not clean up temporary image {temp_image_path}: {cleanup_error}")
+        
+        # Clean up temporary PDF file if it was created for database storage
+        if doc_info.get("storage_type") == "database" and pdf_path:
+            try:
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+                    print(f"DEBUG: Cleaned up temporary PDF file: {pdf_path}")
+            except Exception as pdf_cleanup_error:
+                print(f"DEBUG: Error cleaning up temporary PDF file: {pdf_cleanup_error}")
         
         return response.content
         
@@ -1287,6 +1312,387 @@ def internet_search(query: str) -> str:
     except Exception as e:
         return json.dumps({"error": f"Internet search failed: {str(e)}"})
 
+@tool
+def measure_objects(image_path: str, objects_json: str, target_object: str, reference_scale: float = None, reference_unit: str = "meters") -> str:
+    """
+    Measure dimensions of objects in floor plans using pixel-to-real-world conversion.
+    
+    Args:
+        image_path: Path to the floor plan image
+        objects_json: JSON string of detected objects from detect_floor_plan_objects
+        target_object: The object to measure (e.g., "steel base plate", "door", "window")
+        reference_scale: Optional known scale (e.g., if 100 pixels = 1 meter, pass 100)
+        reference_unit: Unit of measurement ("meters", "feet", "inches", "millimeters")
+    
+    Returns:
+        JSON string with measurement results
+    """
+    try:
+        import math
+        import cv2
+        import numpy as np
+        
+        # Parse detected objects
+        detected_objects = json.loads(objects_json)
+        if not isinstance(detected_objects, list):
+            return json.dumps({"error": "Invalid objects data format"})
+        
+        # Find target objects
+        target_objects = []
+        target_lower = target_object.lower()
+        
+        for obj in detected_objects:
+            class_name = obj.get('class_name', '').lower()
+            if target_lower in class_name or class_name in target_lower:
+                target_objects.append(obj)
+        
+        if not target_objects:
+            available_objects = list(set(obj.get('class_name', 'unknown') for obj in detected_objects))
+            return json.dumps({
+                "error": f"No '{target_object}' objects found. Available objects: {available_objects}",
+                "available_objects": available_objects
+            })
+        
+        # Load image for processing
+        image = cv2.imread(image_path)
+        if image is None:
+            return json.dumps({"error": f"Could not load image from {image_path}"})
+        
+        height, width = image.shape[:2]
+        
+        # Calculate scale if not provided
+        scale_info = None
+        if reference_scale is None:
+            scale_info = _auto_detect_scale(image, detected_objects)
+        else:
+            scale_info = {
+                "pixels_per_unit": reference_scale,
+                "unit": reference_unit,
+                "method": "user_provided",
+                "confidence": 1.0
+            }
+        
+        if not scale_info:
+            return json.dumps({
+                "error": "Could not determine scale automatically. Please provide reference_scale parameter.",
+                "suggestion": "Provide a reference scale like: 100 (meaning 100 pixels = 1 meter)"
+            })
+        
+        # Measure each target object
+        measurements = []
+        
+        for i, obj in enumerate(target_objects):
+            bbox = obj['bbox']
+            x1, y1, x2, y2 = bbox
+            
+            # Calculate dimensions in pixels
+            pixel_width = abs(x2 - x1)
+            pixel_height = abs(y2 - y1)
+            pixel_area = pixel_width * pixel_height
+            diagonal_length = math.sqrt(pixel_width**2 + pixel_height**2)
+            
+            # Convert to real-world units
+            real_width = pixel_width / scale_info["pixels_per_unit"]
+            real_height = pixel_height / scale_info["pixels_per_unit"]
+            real_area = pixel_area / (scale_info["pixels_per_unit"] ** 2)
+            real_diagonal = diagonal_length / scale_info["pixels_per_unit"]
+            
+            # Apply common object-specific adjustments
+            adjusted_measurements = _apply_object_specific_adjustments(
+                target_object, real_width, real_height, real_area
+            )
+            
+            measurements.append({
+                "object_id": i + 1,
+                "class_name": obj.get('class_name', 'unknown'),
+                "confidence": obj.get('confidence', 0),
+                "pixel_measurements": {
+                    "width": round(pixel_width, 2),
+                    "height": round(pixel_height, 2),
+                    "area": round(pixel_area, 2),
+                    "diagonal": round(diagonal_length, 2)
+                },
+                "real_world_measurements": {
+                    "width": round(real_width, 3),
+                    "height": round(real_height, 3),
+                    "area": round(real_area, 3),
+                    "diagonal": round(real_diagonal, 3),
+                    "unit": scale_info["unit"]
+                },
+                "adjusted_measurements": adjusted_measurements,
+                "bbox": bbox
+            })
+        
+        # Generate summary
+        if measurements:
+            widths = [m["real_world_measurements"]["width"] for m in measurements]
+            avg_width = sum(widths) / len(widths)
+            min_width = min(widths)
+            max_width = max(widths)
+            
+            summary = {
+                "total_objects_measured": len(measurements),
+                "average_width": round(avg_width, 3),
+                "min_width": round(min_width, 3),
+                "max_width": round(max_width, 3),
+                "measurement_unit": scale_info["unit"]
+            }
+        else:
+            summary = {}
+        
+        result = {
+            "success": True,
+            "target_object": target_object,
+            "scale_info": scale_info,
+            "measurements": measurements,
+            "summary": summary,
+            "image_dimensions": {"width": width, "height": height}
+        }
+        
+        return json.dumps(result, indent=2)
+        
+    except Exception as e:
+        return json.dumps({"error": f"Measurement failed: {str(e)}"})
+
+def _auto_detect_scale(image, detected_objects):
+    """
+    Automatically detect scale by looking for standard-sized objects.
+    """
+    try:
+        import cv2
+        import numpy as np
+        
+        # Common real-world dimensions (in meters)
+        STANDARD_DIMENSIONS = {
+            'door': 0.9,  # Standard door width
+            'window': 1.2,  # Standard window width
+            'table': 0.9,   # Standard table width
+            'chair': 0.5,   # Standard chair width
+            'toilet': 0.4,  # Standard toilet width
+        }
+        
+        # Look for objects with known standard dimensions
+        for obj in detected_objects:
+            class_name = obj.get('class_name', '').lower()
+            
+            for standard_obj, standard_width in STANDARD_DIMENSIONS.items():
+                if standard_obj in class_name:
+                    bbox = obj['bbox']
+                    pixel_width = abs(bbox[2] - bbox[0])
+                    
+                    if pixel_width > 10:  # Ensure reasonable detection
+                        pixels_per_meter = pixel_width / standard_width
+                        
+                        return {
+                            "pixels_per_unit": pixels_per_meter,
+                            "unit": "meters",
+                            "reference_object": class_name,
+                            "reference_width_meters": standard_width,
+                            "method": f"auto_detected_from_{standard_obj}",
+                            "confidence": min(obj.get('confidence', 0.5), 0.8)  # Cap confidence
+                        }
+        
+        # Fallback: Use image dimensions and typical floor plan scales
+        height, width = image.shape[:2]
+        
+        # Assume typical residential floor plan scale
+        # For a 10m room in a 1000px image, scale would be 100 px/m
+        typical_scale = max(width, height) / 15.0  # Assume 15m for largest dimension
+        
+        return {
+            "pixels_per_unit": typical_scale,
+            "unit": "meters",
+            "method": "estimated_from_image_size",
+            "confidence": 0.3,
+            "note": "This is an estimation. For accurate measurements, provide a reference scale."
+        }
+        
+    except Exception as e:
+        print(f"DEBUG: Auto-scale detection failed: {e}")
+        return None
+
+def _apply_object_specific_adjustments(object_type, width, height, area):
+    """
+    Apply object-specific measurement adjustments based on typical dimensions.
+    """
+    object_type_lower = object_type.lower()
+    adjustments = {}
+    
+    # Steel base plate specific adjustments
+    if 'steel' in object_type_lower and 'base' in object_type_lower and 'plate' in object_type_lower:
+        # Steel base plates are typically square or rectangular with specific thickness
+        adjustments.update({
+            "likely_thickness_mm": "16-25 mm (typical structural steel)",
+            "likely_material": "A36 Steel or equivalent",
+            "volume_cm3": round(width * 100 * height * 100 * 0.02, 2),  # Assuming 2cm thickness
+            "weight_kg": round(width * height * 0.02 * 7850, 2),  # steel density 7850 kg/m3
+            "common_sizes": "150x150mm to 600x600mm for column base plates"
+        })
+    
+    # Door specific adjustments
+    elif 'door' in object_type_lower:
+        adjustments.update({
+            "standard_width_m": 0.9,
+            "standard_height_m": 2.1,
+            "type": "Interior/Exterior door based on context",
+            "swing_clearance": "0.6-0.9m required"
+        })
+    
+    # Window specific adjustments
+    elif 'window' in object_type_lower:
+        adjustments.update({
+            "standard_height_m": 1.2,
+            "sill_height_m": "0.9-1.0 typical",
+            "type": "Fixed/Casement/Double-hung based on proportions"
+        })
+    
+    # Furniture adjustments
+    elif any(furniture in object_type_lower for furniture in ['table', 'desk', 'counter']):
+        adjustments.update({
+            "standard_height_m": 0.75,
+            "typical_depth_m": 0.6 if width > 0.8 else 0.4,
+            "usage_notes": "Check for ergonomic clearances"
+        })
+    
+    elif 'chair' in object_type_lower:
+        adjustments.update({
+            "standard_height_m": 0.45,
+            "standard_depth_m": 0.5,
+            "clearance_required": "0.6-0.8m behind"
+        })
+    
+    # Add general engineering notes
+    adjustments["measurement_notes"] = [
+        "Measurements are approximate based on pixel analysis",
+        "Verify with actual site measurements for construction",
+        "Consider manufacturing tolerances ±2mm",
+        "Check local building codes for required dimensions"
+    ]
+    
+    return adjustments
+
+@tool
+def calibrate_scale(image_path: str, known_width_pixels: float, known_width_real: float, real_unit: str = "meters") -> str:
+    """
+    Calibrate the measurement scale using a known dimension.
+    
+    Args:
+        image_path: Path to the floor plan image
+        known_width_pixels: Width of a known object in pixels
+        known_width_real: Actual width of the object in real units
+        real_unit: Unit of measurement ("meters", "feet", "inches", "millimeters")
+    
+    Returns:
+        JSON string with calibration results
+    """
+    try:
+        pixels_per_unit = known_width_pixels / known_width_real
+        
+        result = {
+            "success": True,
+            "calibration": {
+                "pixels_per_unit": round(pixels_per_unit, 2),
+                "unit": real_unit,
+                "known_reference": {
+                    "pixels": known_width_pixels,
+                    "real_units": known_width_real,
+                    "unit": real_unit
+                }
+            },
+            "usage_example": f"Use pixels_per_unit={round(pixels_per_unit, 2)} in measure_objects tool",
+            "common_conversions": {
+                "pixels_per_meter": round(pixels_per_unit, 2) if real_unit == "meters" else "N/A",
+                "pixels_per_foot": round(pixels_per_unit / 0.3048, 2) if real_unit == "meters" else "N/A",
+                "pixels_per_inch": round(pixels_per_unit / 0.0254, 2) if real_unit == "meters" else "N/A"
+            }
+        }
+        
+        return json.dumps(result, indent=2)
+        
+    except Exception as e:
+        return json.dumps({"error": f"Scale calibration failed: {str(e)}"})
+
+@tool
+def analyze_object_proportions(image_path: str, objects_json: str, target_object: str) -> str:
+    """
+    Analyze proportions and relationships between objects for design validation.
+    """
+    try:
+        detected_objects = json.loads(objects_json)
+        
+        # Find target objects
+        target_objects = [obj for obj in detected_objects 
+                         if target_object.lower() in obj.get('class_name', '').lower()]
+        
+        if not target_objects:
+            return json.dumps({"error": f"No '{target_object}' objects found"})
+        
+        proportions_analysis = []
+        
+        for obj in target_objects:
+            bbox = obj['bbox']
+            width = abs(bbox[2] - bbox[0])
+            height = abs(bbox[3] - bbox[1])
+            
+            aspect_ratio = width / height if height > 0 else 0
+            
+            # Analyze proportions
+            if 0.9 <= aspect_ratio <= 1.1:
+                shape = "Square"
+            elif aspect_ratio > 1.1:
+                shape = "Horizontal Rectangle"
+            else:
+                shape = "Vertical Rectangle"
+            
+            # Golden ratio check
+            golden_ratio = 1.618
+            golden_deviation = abs(aspect_ratio - golden_ratio) / golden_ratio
+            
+            proportions_analysis.append({
+                "object_id": obj.get('class_name', 'unknown'),
+                "aspect_ratio": round(aspect_ratio, 3),
+                "shape_classification": shape,
+                "golden_ratio_deviation": f"{round(golden_deviation * 100, 1)}%",
+                "width_px": round(width, 2),
+                "height_px": round(height, 2),
+                "design_notes": _get_design_notes(target_object, aspect_ratio)
+            })
+        
+        return json.dumps({
+            "success": True,
+            "proportions_analysis": proportions_analysis,
+            "target_object": target_object
+        }, indent=2)
+        
+    except Exception as e:
+        return json.dumps({"error": f"Proportion analysis failed: {str(e)}"})
+
+def _get_design_notes(object_type, aspect_ratio):
+    """Provide design guidance based on object type and proportions."""
+    object_type_lower = object_type.lower()
+    
+    if 'steel' in object_type_lower and 'base' in object_type_lower:
+        if 0.8 <= aspect_ratio <= 1.2:
+            return "Good proportion for base plate - provides balanced load distribution"
+        elif aspect_ratio > 1.5:
+            return "Consider additional stiffeners for long base plates"
+        else:
+            return "Verify anchor bolt placement for this aspect ratio"
+    
+    elif 'door' in object_type_lower:
+        if 0.4 <= aspect_ratio <= 0.45:
+            return "Standard door proportion (0.9x2.1m)"
+        else:
+            return "Non-standard door proportion - check accessibility requirements"
+    
+    elif 'window' in object_type_lower:
+        if 1.5 <= aspect_ratio <= 2.5:
+            return "Good window proportion for natural light"
+        else:
+            return "Consider window operation type with this proportion"
+    
+    return "Proportion appears reasonable for the object type"
+
 # List of all available tools
 ALL_TOOLS = [
     load_pdf_for_floorplan,
@@ -1302,5 +1708,8 @@ ALL_TOOLS = [
     save_annotated_image_as_pdf_page,
     answer_question_using_rag,  # Fast text-only RAG
     answer_question_with_suggestions,  # Optimized smart analysis
-    quick_page_analysis  # Fast text-only page analysis
+    quick_page_analysis,  # Fast text-only page analysis
+    measure_objects,
+    calibrate_scale,
+    analyze_object_proportions
 ]

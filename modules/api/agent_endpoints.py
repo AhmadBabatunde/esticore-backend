@@ -121,57 +121,17 @@ async def unified_agent(
         # Ensure output directory exists
         os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
     
-    # Get recent chat context
-    chat_history = agent_workflow.get_chat_history(session_id, user_id, limit=10)
-    recent_context = ""
-    if len(chat_history) > 1:  # If there's previous conversation (more than current message)
-        recent_messages = chat_history[-6:]  # Last few exchanges
-        recent_context = "\n\nRecent conversation context:\n"
-        for msg in recent_messages:
-            recent_context += f"{msg['role']}: {msg['content']}\n"
-    
-    # Enhanced instruction for the agent with optimization guidance
-    enhanced_instruction = f"""
+    # Simple instruction for the agent - let the workflow handle tool selection
+    simple_instruction = f"""
 Document ID: {doc_id}
+Page: {page_number}
 User Request: {user_instruction}
-Extracted Page: {page_number}{recent_context}
 
-Optimized Instructions for AI Agent:
-1. INTENT ANALYSIS - Determine the user's intent and choose the FASTEST appropriate approach:
-   
-2. FOR QUESTIONS about document content:
-   a) If asking about a SPECIFIC PAGE ("page X"):
-      - Use answer_question_with_suggestions (it's optimized for direct page requests)
-      - It will automatically detect if text analysis is sufficient or if visual analysis is needed
-   
-   b) If asking GENERAL questions across multiple pages:
-      - For text-based questions ("what does it say", "explain the content"): Use answer_question_using_rag (FASTEST)
-      - For visual/spatial questions ("where is", "what does it look like", "layout"): Use answer_question_with_suggestions
-   
-   c) For QUICK page summaries without visual details:
-      - Use quick_page_analysis (FASTEST for text-only page info)
-
-3. FOR ANNOTATION/HIGHLIGHTING requests:
-   - Follow the standard annotation workflow:
-   - Load PDF → Convert to image → Detect objects → Apply annotation → Save PDF
-   - When the user requests to annotate specific items (e.g., "highlight all doors", "circle windows"):
-     * Use the detect_floor_plan_objects tool to get all objects
-     * Use the verify_detections tool to check if the requested object type exists
-     * Use the appropriate annotation tool with the filter_condition parameter to target only those specific items
-     * ALWAYS call save_annotated_image_as_pdf_page at the end
-
-4. PERFORMANCE PRIORITY:
-   - Choose the fastest tool that can adequately answer the question
-   - Only use visual analysis when specifically needed for spatial/visual questions
-   - Prefer text-only analysis when sufficient
-
-IMPORTANT: The tools are now optimized - answer_question_with_suggestions intelligently decides between text-only and visual analysis based on the question type and page content.
-
-Please proceed with the most efficient approach for the user's request.
+Please handle this request using the most appropriate tool.
 """
     
     initial_state = {
-        "messages": [HumanMessage(content=enhanced_instruction)],
+        "messages": [HumanMessage(content=simple_instruction)],
         "pdf_path": pdf_path,
         "page_number": page_number,
         "output_path": output_pdf_path,
@@ -514,55 +474,22 @@ async def unified_agent_for_project(
         # Ensure output directory exists
         os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
     
-    # Get recent chat context
-    chat_history = agent_workflow.get_chat_history(session_id, user_id, limit=10)
-    recent_context = ""
-    if len(chat_history) > 1:  # If there's previous conversation (more than current message)
-        recent_messages = chat_history[-6:]  # Last few exchanges
-        recent_context = "\n\nRecent conversation context:\n"
-        for msg in recent_messages:
-            recent_context += f"{msg['role']}: {msg['content']}\n"
-    
-    # Enhanced instruction for the agent with project context
-    enhanced_instruction = f"""
+    # Simple instruction for the agent with project context
+    simple_instruction = f"""
 Project Context:
 - Project ID: {project_id}
 - Project Name: {project["name"]}
-- Project Description: {project["description"]}
 - Document ID: {final_doc_id}
-- Document: {selected_document["filename"]} ({selected_document["pages"]} pages)
-- Available Documents: {[doc['filename'] + ' (' + doc['doc_id'] + ')' for doc in project['documents']]}
+- Document: {selected_document["filename"]}
+- Page: {page_number}
 
 User Request: {user_instruction}
-Extracted Page: {page_number}{recent_context}
 
-Instructions for AI Agent:
-1. You are working within the context of project "{project["name"]}"
-2. Analyze the user's request to determine their intent
-3. Extract page number from the instruction if mentioned, otherwise use page {page_number}
-4. If they are asking a QUESTION about the document content:
-   - ALWAYS use answer_question_with_suggestions (not answer_question_using_rag)
-   - This function returns structured JSON with answer and suggestions array
-   - Do NOT format suggestions manually in text - let the function handle it
-5. If they want to ANNOTATE/HIGHLIGHT/MARK something:
-   - Load PDF
-   - Convert page to image  
-   - Detect objects
-   - When the user requests to annotate specific items (e.g., "highlight all doors", "circle windows"):
-     * Use the verify_detections tool to check if the requested object type exists
-     * Use the appropriate annotation tool with the filter_condition parameter to target only those specific items
-   - Apply requested annotation
-   - Save annotated PDF
-6. Consider project context and conversation history
-7. Be helpful and provide detailed responses
-
-IMPORTANT: For questions, use answer_question_with_suggestions and return its JSON output directly.
-
-Please proceed based on the user's intent.
+Please handle this request using the most appropriate tool.
 """
     
     initial_state = {
-        "messages": [HumanMessage(content=enhanced_instruction)],
+        "messages": [HumanMessage(content=simple_instruction)],
         "pdf_path": pdf_path,
         "page_number": page_number,
         "output_path": output_pdf_path,
@@ -760,4 +687,3 @@ Please proceed based on the user's intent.
                     print(f"DEBUG: Cleaned up temporary PDF file: {pdf_path}")
             except Exception as e:
                 print(f"DEBUG: Error cleaning up temporary PDF file: {e}")
-
