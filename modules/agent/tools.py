@@ -615,7 +615,7 @@ def apply_highlight_annotation(image_path: str = "temp_floor_plan.png",
 
 @tool
 def apply_circle_annotation(image_path: str = "temp_floor_plan.png", objects_json: str = "", filter_condition: str = "") -> str:
-    """Draw circles around the center of detected objects matching the filter condition."""
+    """Draw circles around detected objects with intelligent dynamic sizing based on object dimensions."""
     try:
         if not objects_json:
             return "Error: No objects data provided."
@@ -641,13 +641,36 @@ def apply_circle_annotation(image_path: str = "temp_floor_plan.png", objects_jso
         else:
             objects_to_annotate = all_objects
 
-        print(f"DEBUG: Applying circle annotation to {len(objects_to_annotate)} objects")
+        print(f"DEBUG: Applying intelligent circle annotation to {len(objects_to_annotate)} objects")
 
         image = Image.open(image_path).convert("RGB")
         draw = ImageDraw.Draw(image)
-        radius = 15
+        
+        # Get image dimensions for scaling
+        img_width, img_height = image.size
+        
+        # Calculate object size statistics for intelligent scaling
+        object_sizes = []
+        for obj in objects_to_annotate:
+            bbox = obj['bbox']
+            obj_width = abs(bbox[2] - bbox[0])
+            obj_height = abs(bbox[3] - bbox[1])
+            obj_size = max(obj_width, obj_height)  # Use largest dimension
+            object_sizes.append(obj_size)
+        
+        if object_sizes:
+            avg_size = sum(object_sizes) / len(object_sizes)
+            max_size = max(object_sizes)
+            min_size = min(object_sizes)
+        else:
+            avg_size = 50
+            max_size = 100
+            min_size = 10
+        
+        print(f"DEBUG: Object size stats - Min: {min_size:.1f}, Avg: {avg_size:.1f}, Max: {max_size:.1f} px")
+        
         circle_color = (255, 0, 0)  # Red
-        text_color = (0, 0, 0)   # Black text
+        text_color = (0, 0, 0)      # Black text
         
         try:
             font = ImageFont.truetype("arial.ttf", 18)
@@ -660,28 +683,85 @@ def apply_circle_annotation(image_path: str = "temp_floor_plan.png", objects_jso
             x1, y1, x2, y2 = bbox
             center_x, center_y = (x1 + x2) // 2, (y1 + y2) // 2
             
+            # Calculate object dimensions
+            obj_width = abs(x2 - x1)
+            obj_height = abs(y2 - y1)
+            obj_size = max(obj_width, obj_height)
+            
+            # Intelligent radius calculation based on object size relative to image and other objects
+            base_radius = 15
+            
+            # Scale factor based on object size relative to average
+            if obj_size > avg_size * 2:  # Very large object
+                scale_factor = 3.0
+            elif obj_size > avg_size * 1.5:  # Large object
+                scale_factor = 2.5
+            elif obj_size > avg_size:  # Above average
+                scale_factor = 2.0
+            elif obj_size > avg_size * 0.5:  # Average size
+                scale_factor = 1.5
+            else:  # Small object
+                scale_factor = 1.0
+            
+            # Additional scaling based on absolute size
+            absolute_scale = min(3.0, max(0.5, obj_size / 50))
+            
+            # Combine both scaling factors
+            final_scale = (scale_factor + absolute_scale) / 2
+            
+            # Calculate final radius with bounds
+            radius = base_radius * final_scale
+            radius = max(8, min(60, radius))  # Keep between 8-60 pixels
+            
+            # Adjust line width based on circle size
+            line_width = max(2, min(5, int(radius / 10)))
+            
+            print(f"DEBUG: Object '{class_name}' - Size: {obj_size:.1f}px, Radius: {radius:.1f}px, Line: {line_width}px")
+            
+            # Draw the circle with appropriate line width
             draw.ellipse(
                 [(center_x - radius, center_y - radius), (center_x + radius, center_y + radius)],
-                outline=circle_color, width=3
+                outline=circle_color, width=line_width
             )
             
-            # Add label text above the box
-            text_x, text_y = bbox[0], max(0, bbox[1] - 20)
-            draw.text((text_x, text_y), class_name, fill=text_color, font=font)
+            # Add label with smart positioning
+            text_x = max(5, min(center_x - 30, img_width - 80))
+            text_y = max(5, center_y - radius - 25)
+            
+            # Draw text with background for readability
+            try:
+                bbox_text = draw.textbbox((text_x, text_y), class_name, font=font)
+                text_width = bbox_text[2] - bbox_text[0]
+                text_height = bbox_text[3] - bbox_text[1]
+                
+                # Background for text
+                bg_padding = 4
+                draw.rectangle(
+                    [text_x - bg_padding, text_y - bg_padding,
+                     text_x + text_width + bg_padding, text_y + text_height + bg_padding],
+                    fill=(255, 255, 255, 230)  # Semi-transparent white
+                )
+                
+                # Draw text
+                draw.text((text_x, text_y), class_name, fill=text_color, font=font)
+            except Exception as text_error:
+                print(f"DEBUG: Text drawing error: {text_error}")
+                draw.text((text_x, text_y), class_name, fill=text_color)
 
         image.save(image_path)
 
+        size_info = f" (circle sizes adapted from {min(object_sizes):.1f}px to {max(object_sizes):.1f}px objects)" if object_sizes else ""
+        
         if filter_condition:
-            return f"Success: Applied circle annotation to {len(objects_to_annotate)} objects matching '{filter_condition}'."
+            return f"Success: Applied dynamically sized circles to {len(objects_to_annotate)} {filter_condition} objects{size_info}."
         else:
-            return f"Success: Applied circle annotation to all {len(objects_to_annotate)} detected objects."
+            return f"Success: Applied dynamically sized circles to all {len(objects_to_annotate)} detected objects{size_info}."
 
     except Exception as e:
         return f"Error applying circles: {str(e)}"
-
 @tool
 def apply_rectangle_annotation(image_path: str = "temp_floor_plan.png", objects_json: str = "", filter_condition: str = "") -> str:
-    """Draw rectangles around detected objects matching the filter condition and label with class name."""
+    """Draw rectangles around detected objects with intelligent dynamic sizing and object-aware padding."""
     try:
         if not objects_json:
             return "Error: No objects data provided."
@@ -696,7 +776,6 @@ def apply_rectangle_annotation(image_path: str = "temp_floor_plan.png", objects_
         if not all_objects:
             return "No objects were detected to annotate."
 
-        # Filter if requested
         if filter_condition:
             objects_to_annotate = [
                 obj for obj in all_objects
@@ -708,39 +787,148 @@ def apply_rectangle_annotation(image_path: str = "temp_floor_plan.png", objects_
         else:
             objects_to_annotate = all_objects
 
-        print(f"DEBUG: Applying rectangle+label annotation to {len(objects_to_annotate)} objects")
+        print(f"DEBUG: Applying intelligent rectangle annotation to {len(objects_to_annotate)} objects")
 
         image = Image.open(image_path).convert("RGB")
         draw = ImageDraw.Draw(image)
-        rectangle_color = (0, 0, 255)  # Blue
-        text_color = (0, 0, 0)   # Black text
-
-        try:
-            font = ImageFont.truetype("arial.ttf", 18)
-        except:
-            font = ImageFont.load_default()
-
+        
+        img_width, img_height = image.size
+        
+        # Object-specific default sizes for intelligent scaling
+        OBJECT_PROPERTIES = {
+            'room': {'min_padding': 10, 'max_padding': 30, 'line_width': 6, 'font_size': 20},
+            'door': {'min_padding': 8, 'max_padding': 15, 'line_width': 4, 'font_size': 16},
+            'window': {'min_padding': 6, 'max_padding': 12, 'line_width': 3, 'font_size': 14},
+            'table': {'min_padding': 5, 'max_padding': 10, 'line_width': 3, 'font_size': 14},
+            'chair': {'min_padding': 3, 'max_padding': 8, 'line_width': 2, 'font_size': 12},
+            'default': {'min_padding': 4, 'max_padding': 12, 'line_width': 3, 'font_size': 14}
+        }
+        
+        # Calculate size statistics
+        object_sizes = []
         for obj in objects_to_annotate:
             bbox = obj['bbox']
-            class_name = obj.get("class_name", "unknown")
-
-            # Draw rectangle
-            draw.rectangle(bbox, outline=rectangle_color, width=3)
-
-            # Add label text above the box
-            text_x, text_y = bbox[0], max(0, bbox[1] - 20)
-            draw.text((text_x, text_y), class_name, fill=text_color, font=font)
+            obj_size = max(abs(bbox[2] - bbox[0]), abs(bbox[3] - bbox[1]))
+            object_sizes.append(obj_size)
+        
+        if object_sizes:
+            avg_size = sum(object_sizes) / len(object_sizes)
+            max_size = max(object_sizes)
+            min_size = min(object_sizes)
+            size_range = max_size - min_size if max_size > min_size else 1
+        else:
+            avg_size = 50
+            max_size = 100
+            min_size = 10
+            size_range = 90
+        
+        print(f"DEBUG: Object size range: {min_size:.1f}-{max_size:.1f}px (avg: {avg_size:.1f}px)")
+        
+        rectangle_color = (0, 0, 255)  # Blue
+        text_color = (0, 0, 0)        # Black text
+        
+        for obj in objects_to_annotate:
+            bbox = obj['bbox']
+            class_name = obj.get("class_name", "unknown").lower()
+            x1, y1, x2, y2 = bbox
+            
+            # Get object dimensions
+            obj_width = abs(x2 - x1)
+            obj_height = abs(y2 - y1)
+            obj_size = max(obj_width, obj_height)
+            
+            # Find appropriate object properties
+            obj_props = OBJECT_PROPERTIES['default']
+            for obj_type, props in OBJECT_PROPERTIES.items():
+                if obj_type in class_name and obj_type != 'default':
+                    obj_props = props
+                    break
+            
+            # Calculate dynamic padding based on object size and type
+            size_ratio = (obj_size - min_size) / size_range
+            padding_range = obj_props['max_padding'] - obj_props['min_padding']
+            dynamic_padding = obj_props['min_padding'] + (padding_range * size_ratio)
+            
+            # Ensure reasonable bounds
+            dynamic_padding = max(obj_props['min_padding'], min(obj_props['max_padding'], dynamic_padding))
+            
+            # Dynamic line width based on object size
+            line_width = obj_props['line_width']
+            if obj_size > avg_size * 2:
+                line_width += 2
+            elif obj_size > avg_size:
+                line_width += 1
+            
+            # Dynamic font size
+            font_size = obj_props['font_size']
+            if obj_size > avg_size * 1.5:
+                font_size += 2
+            elif obj_size < avg_size * 0.5:
+                font_size = max(10, font_size - 2)
+            
+            print(f"DEBUG: '{class_name}' - Size: {obj_size:.1f}px, Padding: {dynamic_padding:.1f}px, Line: {line_width}px")
+            
+            # Apply dynamic padding
+            padded_x1 = max(0, x1 - dynamic_padding)
+            padded_y1 = max(0, y1 - dynamic_padding)
+            padded_x2 = min(img_width, x2 + dynamic_padding)
+            padded_y2 = min(img_height, y2 + dynamic_padding)
+            
+            # Draw the rectangle
+            draw.rectangle(
+                [padded_x1, padded_y1, padded_x2, padded_y2],
+                outline=rectangle_color, width=line_width
+            )
+            
+            # Add intelligent label
+            try:
+                dynamic_font = ImageFont.truetype("arial.ttf", font_size)
+            except:
+                dynamic_font = ImageFont.load_default()
+            
+            # Smart label positioning
+            label_options = [
+                (padded_x1, padded_y1 - font_size - 5),  # Above top-left
+                (padded_x1, padded_y2 + 5),              # Below bottom-left  
+                (padded_x2 - 100, padded_y1 - font_size - 5),  # Above top-right
+                (padded_x2 - 100, padded_y2 + 5)         # Below bottom-right
+            ]
+            
+            # Find the best position that keeps text within image bounds
+            text_x, text_y = padded_x1, padded_y1 - font_size - 5
+            for option_x, option_y in label_options:
+                if (0 <= option_x <= img_width - 100 and 
+                    0 <= option_y <= img_height - font_size - 5):
+                    text_x, text_y = option_x, option_y
+                    break
+            
+            # Draw text with background
+            bbox_text = draw.textbbox((text_x, text_y), class_name, font=dynamic_font)
+            text_width = bbox_text[2] - bbox_text[0]
+            text_height = bbox_text[3] - bbox_text[1]
+            
+            # Background for readability
+            bg_padding = 4
+            draw.rectangle(
+                [text_x - bg_padding, text_y - bg_padding,
+                 text_x + text_width + bg_padding, text_y + text_height + bg_padding],
+                fill=(255, 255, 255, 240)
+            )
+            
+            # Draw text
+            draw.text((text_x, text_y), class_name, fill=text_color, font=dynamic_font)
 
         image.save(image_path)
 
+        size_info = f" - adapted padding for {min_size:.1f}px to {max_size:.1f}px objects"
+        
         if filter_condition:
-            return f"Success: Applied rectangle+label annotation to {len(objects_to_annotate)} objects matching '{filter_condition}'."
+            return f"Success: Applied intelligent rectangles to {len(objects_to_annotate)} {filter_condition} objects{size_info}."
         else:
-            return f"Success: Applied rectangle+label annotation to all {len(objects_to_annotate)} detected objects."
+            return f"Success: Applied intelligent rectangles to all {len(objects_to_annotate)} detected objects{size_info}."
 
     except Exception as e:
         return f"Error applying rectangles: {str(e)}"
-
 @tool
 def apply_count_annotation(image_path: str = "temp_floor_plan.png", objects_json: str = "", filter_condition: str = "") -> str:
     """Number detected objects matching the filter condition, placing a numbered circle near their bounding box."""
