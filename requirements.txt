@@ -1,45 +1,45 @@
-# # Core FastAPI dependencies
-# fastapi
-# uvicorn[standard]
-# python-multipart
+# Core FastAPI dependencies
+fastapi
+uvicorn[standard]
+python-multipart
 
-# # Authentication dependencies
-# email-validator
-# google-auth
-# google-auth-oauthlib
-# google-auth-httplib2
+# Authentication dependencies
+email-validator
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
 
-# # LangChain and AI dependencies  
-# langchain
-# langmem
-# langchain-openai
-# langchain-community
-# langgraph
-# langchain-tavily
-# tiktoken
+# LangChain and AI dependencies  
+langchain
+langmem
+langchain-openai
+langchain-community
+langgraph
+langchain-tavily
+tiktoken
 
-# # PDF and image processing
-# PyPDF2
-# pypdf
-# pdf2image
-# Pillow
-# opencv-python
+# PDF and image processing
+PyPDF2
+pypdf
+pdf2image
+Pillow
+opencv-python
 
-# # Vector database
-# faiss-cpu
+# Vector database
+faiss-cpu
 
-# # Database drivers
-# PyMySQL
-# mysql-connector-python
-# psycopg2-binary
+# Database drivers
+PyMySQL
+mysql-connector-python
+psycopg2-binary
 
-# # Environment variables
-# python-dotenv
+# Environment variables
+python-dotenv
 
-# # Image processing and annotation
-# inference-sdk
+# Image processing and annotation
+inference-sdk
 
-# # Other utilities
+# Other utilities
 requests
 
 stripe
