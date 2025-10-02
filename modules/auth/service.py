@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from modules.config.settings import settings
 from modules.database import db_manager, User
 import jwt
+from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
 from datetime import datetime, timedelta
 
 class AuthService:
@@ -521,9 +522,9 @@ class AuthService:
         try:
             payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=["HS256"])
             return payload.get("user_id")
-        except jwt.ExpiredSignatureError:
+        except ExpiredSignatureError:
             return None
-        except jwt.InvalidTokenError:
+        except InvalidTokenError:
             return None
 
     def get_user_by_id(self, user_id: int) -> Optional[User]:

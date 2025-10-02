@@ -3,6 +3,7 @@ Admin services for the Floor Plan Agent API
 """
 import hashlib
 import jwt
+from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
 import secrets
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
@@ -22,6 +23,7 @@ class AdminService:
     
     def admin_login(self, email: str, password: str) -> Dict[str, Any]:
         """Admin login process"""
+        
         admin = self.db.verify_admin_credentials(email, password)
         if not admin:
             raise HTTPException(status_code=401, detail="Invalid admin credentials")
@@ -45,9 +47,9 @@ class AdminService:
     def admin_register(self, username: str, email: str, password: str, confirm_password: str, is_super_admin: bool) -> Dict[str, Any]:
         """Admin registration process"""
         # Check if super admin exists (only super admin can create other admins)
-        super_admins = self.db.get_super_admins()
-        if not super_admins and not is_super_admin:
-            raise HTTPException(status_code=403, detail="First admin must be a super admin")
+        # super_admins = self.db.get_super_admins()
+        # if not super_admins and not is_super_admin:
+        #     raise HTTPException(status_code=403, detail="First admin must be a super admin")
         
         if password != confirm_password:
             raise HTTPException(status_code=400, detail="Passwords do not match")
@@ -87,9 +89,9 @@ class AdminService:
         try:
             payload = jwt.decode(token, self.jwt_secret, algorithms=["HS256"])
             return bool(payload.get("admin_id"))
-        except jwt.ExpiredSignatureError:
+        except ExpiredSignatureError:
             return False
-        except jwt.InvalidTokenError:
+        except InvalidTokenError:
             return False
     
     def get_all_users(self, page: int, limit: int, status: Optional[UserStatus], search: Optional[str]) -> Dict[str, Any]:
@@ -273,18 +275,25 @@ class AdminService:
             total_users = self.db.get_total_users_count()
             active_users = self.db.get_active_users_count()
             total_feedback = self.db.get_total_feedback_count()
-            recent_signups = self.db.get_recent_signups(7)  # Last 7 days
+            # recent_signups = self.db.get_recent_signups(7)  # Last 7 days
             
             return {
                 "total_users": total_users,
                 "active_users": active_users,
                 "inactive_users": total_users - active_users,
                 "total_feedback": total_feedback,
-                "recent_signups": recent_signups,
+                # "recent_signups": recent_signups,
                 "storage_usage": self.db.get_total_storage_usage()
             }
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error fetching dashboard statistics: {str(e)}")
+            # raise HTTPException(status_code=500, detail=f"Error fetching dashboard statistics: {str(e)}")
+                    # Log the actual error for debugging
+            print(f"Database error in get_dashboard_statistics: {str(e)}")
+            # Return generic error to client
+            raise HTTPException(
+                status_code=500,
+                detail="Unable to fetch dashboard statistics"
+            )
     
     def get_subscription_reminders(self) -> Dict[str, Any]:
         """Get users who need subscription reminders"""

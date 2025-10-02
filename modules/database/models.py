@@ -2959,17 +2959,25 @@ class DatabaseManager:
         """Get recent signups count"""
         conn = self.get_connection()
         cur = conn.cursor()
-        placeholder = self._get_placeholder()
         
         try:
+            # Validate input to prevent injection
+            if not isinstance(days, int) or days <= 0:
+                days = 7
+                
             if self.use_rds:
-                cur.execute(f"SELECT COUNT(*) FROM userdata WHERE created_at >= DATE_SUB(NOW(), INTERVAL {placeholder} DAY)", (days,))
+                # For MySQL: Use string formatting with validation
+                query = f"SELECT COUNT(*) FROM userdata WHERE created_at >= DATE_SUB(NOW(), INTERVAL {days} DAY)"
+                cur.execute(query)
             else:
-                cur.execute(f"SELECT COUNT(*) FROM userdata WHERE created_at >= datetime('now', '-{placeholder} days')", (days,))
+                # For SQLite: Use parameterized query
+                cur.execute("SELECT COUNT(*) FROM userdata WHERE created_at >= datetime('now', '-? days')", (days,))
+            
             return cur.fetchone()[0]
         finally:
             conn.close()
-    
+
+
     def get_total_storage_usage(self) -> int:
         """Get total storage usage in MB"""
         conn = self.get_connection()
@@ -3869,3 +3877,4 @@ class DatabaseManager:
 
 # Global database manager instance
 db_manager = DatabaseManager()
+
