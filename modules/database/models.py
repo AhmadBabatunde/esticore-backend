@@ -2261,6 +2261,61 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def get_all_users_paginated(self, page: int = 1, limit: int = 20, status: Optional[str] = None, search: Optional[str] = None) -> List[User]:
+        """Get users with pagination and filtering"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            # Base query
+            query = """
+                SELECT id, firstname, lastname, email, password, google_id, is_verified, 
+                    verification_token, verification_token_expires, created_at, is_active, profile_image 
+                FROM userdata 
+                WHERE 1=1
+            """
+            params = []
+            
+            # Add status filter
+            if status:
+                if status == "active":
+                    query += f" AND is_active = {placeholder}"
+                    params.append(True)
+                elif status == "inactive": 
+                    query += f" AND is_active = {placeholder}"
+                    params.append(False)
+            
+            # Add search filter
+            if search:
+                query += f" AND (email LIKE {placeholder} OR firstname LIKE {placeholder} OR lastname LIKE {placeholder})"
+                search_term = f"%{search}%"
+                params.extend([search_term, search_term, search_term])
+            
+            # Add ordering and pagination
+            query += f" ORDER BY created_at DESC LIMIT {placeholder} OFFSET {placeholder}"
+            
+            # Calculate offset
+            offset = (page - 1) * limit
+            params.extend([limit, offset])
+            
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            
+            return [
+                User(
+                    id=row[0], firstname=row[1], lastname=row[2], email=row[3], password=row[4],
+                    google_id=row[5], is_verified=bool(row[6]), verification_token=row[7],
+                    verification_token_expires=row[8], created_at=row[9], is_active=bool(row[10]),
+                    profile_image=row[11]
+                )
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    
+
     # Admin management methods
     def create_admin_user(self, username: str, email: str, password: str, is_super_admin: bool = False) -> int:
         """Create a new admin user"""
@@ -2365,15 +2420,20 @@ class DatabaseManager:
 
     # Subscription plan methods
     def create_subscription_plan(self, name: str, description: str, price_monthly: float, price_annual: float,
-                               storage_gb: int, project_limit: int, user_limit: int, action_limit: int,
-                               features: List[str], has_free_trial: bool, trial_days: int) -> int:
+                           storage_gb: int, project_limit: int, user_limit: int, action_limit: int,
+                           features: List[str], has_free_trial: bool, trial_days: int) -> int:
         """Create a new subscription plan"""
         conn = self.get_connection()
         cur = conn.cursor()
         placeholder = self._get_placeholder()
         
         try:
+            # Debug: print what we're receiving
+            print(f"DB Method - Features received: {features}")
+            print(f"DB Method - Features type: {type(features)}")
+            
             features_json = json.dumps(features) if features else "[]"
+            print(f"DB Method - Features JSON: {features_json}")
             
             cur.execute(
                 f"INSERT INTO subscription_plans (name, description, price_monthly, price_annual, storage_gb, project_limit, user_limit, action_limit, features, has_free_trial, trial_days) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
@@ -2384,9 +2444,11 @@ class DatabaseManager:
             cur.execute(f"SELECT id FROM subscription_plans WHERE name = {placeholder}", (name,))
             plan = cur.fetchone()
             return plan[0] if plan else None
+        except Exception as e:
+            print(f"Database error: {str(e)}")
+            raise
         finally:
             conn.close()
-    
     def get_all_subscription_plans(self) -> List[SubscriptionPlan]:
         """Get all subscription plans"""
         conn = self.get_connection()
@@ -2398,12 +2460,33 @@ class DatabaseManager:
             
             plans = []
             for row in rows:
+                # Enhanced debugging for each row
+                print(f"Plan {row[0]} - Raw features from DB: {repr(row[9])}")
+                print(f"Plan {row[0]} - Features type: {type(row[9])}")
+                
                 features = []
-                if row[9]:
+                features_data = row[9]
+                
+                # More robust parsing logic
+                if features_data:
                     try:
-                        features = json.loads(row[9])
-                    except:
+                        # Handle the case where it might already be a list or need JSON parsing
+                        if isinstance(features_data, (list, dict)):
+                            features = features_data
+                        elif isinstance(features_data, str):
+                            features = json.loads(features_data)
+                        else:
+                            # For other types (like PostgreSQL JSONB), try direct conversion
+                            features = list(features_data) if hasattr(features_data, '__iter__') and not isinstance(features_data, str) else []
+                        
+                        print(f"Plan {row[0]} - Successfully parsed features: {features}")
+                    except (json.JSONDecodeError, TypeError, ValueError) as e:
+                        print(f"Plan {row[0]} - JSON parsing error: {e}")
+                        print(f"Plan {row[0]} - Problematic data: {repr(features_data)}")
                         features = []
+                else:
+                    print(f"Plan {row[0]} - Features data is None or empty")
+                    features = []
                 
                 plans.append(SubscriptionPlan(
                     id=row[0], name=row[1], description=row[2], 
@@ -2415,18 +2498,20 @@ class DatabaseManager:
             return plans
         finally:
             conn.close()
-    
     def get_subscription_plan_by_id(self, plan_id: int) -> Optional[SubscriptionPlan]:
         """Get subscription plan by ID"""
         conn = self.get_connection()
         cur = conn.cursor()
-        placeholder = self._get_placeholder()
+        placeholder = self._get_placeholder()  # This should be "%s" for PostgreSQL
         
         try:
-            cur.execute("SELECT id, name, description, price_monthly, price_annual, storage_gb, project_limit, user_limit, action_limit, features, is_active, has_free_trial, trial_days, created_at FROM subscription_plans WHERE id = ?", (plan_id,))
+            # Use the placeholder variable correctly
+            query = f"SELECT id, name, description, price_monthly, price_annual, storage_gb, project_limit, user_limit, action_limit, features, is_active, has_free_trial, trial_days, created_at FROM subscription_plans WHERE id = {placeholder}"
+            cur.execute(query, (plan_id,))  # Pass parameters as a tuple
             row = cur.fetchone()
             
             if row:
+                
                 features = []
                 if row[9]:
                     try:
@@ -2508,15 +2593,34 @@ class DatabaseManager:
             conn.close()
     
     def delete_subscription_plan(self, plan_id: int) -> bool:
-        """Delete subscription plan"""
+        """Delete a subscription plan from the database"""
         conn = self.get_connection()
         cur = conn.cursor()
-        placeholder = self._get_placeholder()
+        placeholder = self._get_placeholder()  # This should be "?" for SQLite or "%s" for PostgreSQL
         
         try:
+            # The key is to properly pass the plan_id as a parameter tuple
             cur.execute(f"DELETE FROM subscription_plans WHERE id = {placeholder}", (plan_id,))
             conn.commit()
             return cur.rowcount > 0
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            conn.close()
+    # Add this debug method to your DatabaseManager
+    def debug_plan_features(self, plan_id: int):    
+        conn = self.get_connection()
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT id, name, features, pg_typeof(features) as data_type FROM subscription_plans WHERE id = %s", (plan_id,))
+            row = cur.fetchone()
+            if row:
+                print(f"Plan {row[0]} ({row[1]}):")
+                print(f"  Raw features: {repr(row[2])}")
+                print(f"  Data type: {row[3]}")
+                print(f"  Is None: {row[2] is None}")
+                print(f"  Is empty string: {row[2] == ''}")
         finally:
             conn.close()
 
@@ -2738,6 +2842,37 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def delete_ai_model(self, model_id: int) -> bool:
+        """Delete an AI model configuration"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            # First check if the model exists and is active
+            cur.execute(f"SELECT is_active FROM ai_models WHERE id = {placeholder}", (model_id,))
+            result = cur.fetchone()
+            
+            if not result:
+                return False  # Model not found
+                
+            if result[0]:  # Check if is_active is True
+                # Don't allow deletion of active model
+                raise Exception("Cannot delete the active AI model. Please activate another model first.")
+            
+            # Delete the model
+            cur.execute(f"DELETE FROM ai_models WHERE id = {placeholder}", (model_id,))
+            conn.commit()
+            return cur.rowcount > 0
+            
+        except Exception as e:
+            conn.rollback()
+            if "Cannot delete the active AI model" in str(e):
+                raise e  # Re-raise the business logic error
+            raise Exception(f"Database error while deleting AI model: {str(e)}")
+        finally:
+            conn.close()
+
     # Recently viewed projects methods
     def add_recently_viewed_project(self, user_id: int, project_id: str) -> bool:
         """Add or update recently viewed project"""
@@ -2825,8 +2960,8 @@ class DatabaseManager:
             # FIXED: Use backticks around interval in the query
             cur.execute(f"""
                 SELECT us.id, us.user_id, us.plan_id, us.stripe_subscription_id, us.stripe_customer_id,
-                       us.current_period_start, us.current_period_end, us.status, us.`interval`, 
-                       us.auto_renew, us.is_active, us.created_at, us.updated_at
+                    us.current_period_start, us.current_period_end, us.status, us.interval, 
+                    us.auto_renew, us.is_active, us.created_at, us.updated_at
                 FROM user_subscriptions us
                 WHERE us.user_id = {placeholder} AND us.is_active = TRUE
                 ORDER BY us.created_at DESC
@@ -2944,13 +3079,21 @@ class DatabaseManager:
         finally:
             conn.close()
     
-    def get_total_feedback_count(self) -> int:
-        """Get total feedback count"""
+    def get_total_feedback_count(self, rating: str = None) -> int:
+        """Get total feedback count with optional rating filter"""
         conn = self.get_connection()
         cur = conn.cursor()
+        placeholder = self._get_placeholder()
         
         try:
-            cur.execute("SELECT COUNT(*) FROM feedback")
+            query = "SELECT COUNT(*) FROM feedback"
+            params = []
+            
+            if rating:
+                query += f" WHERE rating = {placeholder}"
+                params.append(rating)
+            
+            cur.execute(query, params)
             return cur.fetchone()[0]
         finally:
             conn.close()
@@ -2994,65 +3137,28 @@ class DatabaseManager:
         """Get subscriptions expiring soon"""
         conn = self.get_connection()
         cur = conn.cursor()
-        placeholder = self._get_placeholder()
         
         try:
             if self.use_rds:
-                cur.execute(f"""
+                # PostgreSQL syntax - remove DATE_ADD and use INTERVAL directly
+                query = """
                     SELECT us.id, u.email, sp.name, us.current_period_end 
                     FROM user_subscriptions us
                     JOIN userdata u ON us.user_id = u.id
                     JOIN subscription_plans sp ON us.plan_id = sp.id
                     WHERE us.is_active = TRUE 
-                    AND us.current_period_end BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL {placeholder} DAY)
-                """, (days,))
+                    AND us.current_period_end BETWEEN NOW() AND (NOW() + INTERVAL '%s DAY')
+                """
+                cur.execute(query, (days,))
             else:
+                # SQLite syntax (unchanged)
                 cur.execute(f"""
                     SELECT us.id, u.email, sp.name, us.current_period_end 
                     FROM user_subscriptions us
                     JOIN userdata u ON us.user_id = u.id
                     JOIN subscription_plans sp ON us.plan_id = sp.id
                     WHERE us.is_active = TRUE 
-                    AND us.current_period_end BETWEEN datetime('now') AND datetime('now', '+{placeholder} days')
-                """, (days,))
-            
-            rows = cur.fetchall()
-            return [
-                {
-                    "subscription_id": row[0],
-                    "user_email": row[1],
-                    "plan_name": row[2],
-                    "expiry_date": row[3]
-                }
-                for row in rows
-            ]
-        finally:
-            conn.close()
-    
-    def get_recently_expired_subscriptions(self, days: int) -> List[Dict]:
-        """Get recently expired subscriptions"""
-        conn = self.get_connection()
-        cur = conn.cursor()
-        placeholder = self._get_placeholder()
-        
-        try:
-            if self.use_rds:
-                cur.execute(f"""
-                    SELECT us.id, u.email, sp.name, us.current_period_end 
-                    FROM user_subscriptions us
-                    JOIN userdata u ON us.user_id = u.id
-                    JOIN subscription_plans sp ON us.plan_id = sp.id
-                    WHERE us.is_active = TRUE 
-                    AND us.current_period_end BETWEEN DATE_SUB(NOW(), INTERVAL {placeholder} DAY) AND NOW()
-                """, (days,))
-            else:
-                cur.execute(f"""
-                    SELECT us.id, u.email, sp.name, us.current_period_end 
-                    FROM user_subscriptions us
-                    JOIN userdata u ON us.user_id = u.id
-                    JOIN subscription_plans sp ON us.plan_id = sp.id
-                    WHERE us.is_active = TRUE 
-                    AND us.current_period_end BETWEEN datetime('now', '-{placeholder} days') AND datetime('now')
+                    AND us.current_period_end BETWEEN datetime('now') AND datetime('now', '+? days')
                 """, (days,))
             
             rows = cur.fetchall()
@@ -3068,6 +3174,46 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def get_recently_expired_subscriptions(self, days: int) -> List[Dict]:
+        """Get recently expired subscriptions"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        
+        try:
+            if self.use_rds:
+                # PostgreSQL syntax - remove DATE_SUB
+                query = """
+                    SELECT us.id, u.email, sp.name, us.current_period_end 
+                    FROM user_subscriptions us
+                    JOIN userdata u ON us.user_id = u.id
+                    JOIN subscription_plans sp ON us.plan_id = sp.id
+                    WHERE us.is_active = TRUE 
+                    AND us.current_period_end BETWEEN (NOW() - INTERVAL '%s DAY') AND NOW()
+                """
+                cur.execute(query, (days,))
+            else:
+                # SQLite syntax (unchanged)
+                cur.execute(f"""
+                    SELECT us.id, u.email, sp.name, us.current_period_end 
+                    FROM user_subscriptions us
+                    JOIN userdata u ON us.user_id = u.id
+                    JOIN subscription_plans sp ON us.plan_id = sp.id
+                    WHERE us.is_active = TRUE 
+                    AND us.current_period_end BETWEEN datetime('now', '-? days') AND datetime('now')
+                """, (days,))
+            
+            rows = cur.fetchall()
+            return [
+                {
+                    "subscription_id": row[0],
+                    "user_email": row[1],
+                    "plan_name": row[2],
+                    "expiry_date": row[3]
+                }
+                for row in rows
+            ]
+        finally:
+            conn.close()
     # Email verification methods
     def create_verification_token(self, user_id: int, token: str, expires_at: datetime) -> bool:
         """Create or update verification token for user"""
@@ -3878,3 +4024,4 @@ class DatabaseManager:
 # Global database manager instance
 db_manager = DatabaseManager()
 
+# get_all_subscription_plans

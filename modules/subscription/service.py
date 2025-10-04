@@ -203,3 +203,8 @@ class SubscriptionService:
         
         # Update subscription in database
         db_subscription = self.db.get
+
+        
+
+# Global admin service instance
+Subscription_Service = SubscriptionService()

@@ -19,7 +19,7 @@ class AdminService:
     def __init__(self):
         self.db = db_manager
         self.jwt_secret = settings.JWT_SECRET_KEY
-        self.token_expiry = timedelta(hours=24)
+        self.token_expiry = timedelta(hours=24*7 )
     
     def admin_login(self, email: str, password: str) -> Dict[str, Any]:
         """Admin login process"""
@@ -180,7 +180,8 @@ class AdminService:
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error fetching storage stats: {str(e)}")
+            print(f"Error fetching storage stats: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error fetching storage stats:")
     
     def update_user_storage(self, user_id: int, file_size_mb: float) -> Dict[str, Any]:
         """Update user storage usage"""
@@ -220,6 +221,8 @@ class AdminService:
     def get_all_subscription_plans(self) -> Dict[str, Any]:
         """Get all subscription plans"""
         try:
+
+            sth = self.db.debug_plan_features(8)
             plans = self.db.get_all_subscription_plans()
             return {
                 "plans": plans,
@@ -233,6 +236,7 @@ class AdminService:
                                user_limit: int, action_limit: int, features: List[str],
                                has_free_trial: bool, trial_days: int) -> Dict[str, Any]:
         """Create a new subscription plan"""
+        
         try:
             plan_id = self.db.create_subscription_plan(
                 name, description, price_monthly, price_annual, storage_gb,
@@ -247,7 +251,146 @@ class AdminService:
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error creating subscription plan: {str(e)}")
-    
+
+    def update_subscription_plan(self, plan_id: int, name: Optional[str] = None,
+                           description: Optional[str] = None, price_monthly: Optional[float] = None,
+                           price_annual: Optional[float] = None, storage_gb: Optional[int] = None,
+                           project_limit: Optional[int] = None, user_limit: Optional[int] = None,
+                           action_limit: Optional[int] = None, features: Optional[List[str]] = None,
+                           is_active: Optional[bool] = None) -> Dict[str, Any]:
+        """Update a subscription plan with partial data"""
+        try:
+            # Check if plan exists before update
+            existing_plan = self.db.get_subscription_plan_by_id(plan_id)
+            if not existing_plan:
+                raise HTTPException(status_code=404, detail="Subscription plan not found")
+
+            # Prepare update data from provided fields
+            update_data = {}
+            if name is not None:
+                update_data['name'] = name
+            if description is not None:
+                update_data['description'] = description
+            if price_monthly is not None:
+                update_data['price_monthly'] = price_monthly
+            if price_annual is not None:
+                update_data['price_annual'] = price_annual
+            if storage_gb is not None:
+                update_data['storage_gb'] = storage_gb
+            if project_limit is not None:
+                update_data['project_limit'] = project_limit
+            if user_limit is not None:
+                update_data['user_limit'] = user_limit
+            if action_limit is not None:
+                update_data['action_limit'] = action_limit
+            if features is not None:
+                update_data['features'] = features  # This will be JSON encoded in the DB manager
+            if is_active is not None:
+                update_data['is_active'] = is_active
+
+            # Perform the update
+            success = self.db.update_subscription_plan(plan_id, **update_data)
+            
+            if not success:
+                raise HTTPException(status_code=500, detail="Failed to update subscription plan")
+
+            # Fetch and return the updated plan
+            updated_plan = self.db.get_subscription_plan_by_id(plan_id)
+            return {
+                "message": "Subscription plan updated successfully",
+                "plan_id": plan_id,
+                "plan": updated_plan
+            }
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error updating subscription plan: {str(e)}")
+
+    def delete_subscription_plan(self, plan_id: int) -> Dict[str, Any]:
+        """Delete a subscription plan"""
+        try:
+            # First, check if the plan exists
+            plan = self.db.get_subscription_plan_by_id(plan_id)
+            if not plan:
+                raise HTTPException(status_code=404, detail="Subscription plan not found")
+            
+            # Check if any users are currently subscribed to this plan
+            # You might want to add this method to your DatabaseManager
+            # active_subscriptions = self.db.get_active_subscriptions_count_by_plan(plan_id)
+            # if active_subscriptions > 0:
+            #     raise HTTPException(
+            #         status_code=400, 
+            #         detail=f"Cannot delete plan with {active_subscriptions} active subscriptions"
+            #     )
+            
+            # Delete the plan from database
+            success = self.db.delete_subscription_plan(plan_id)
+            if not success:
+                raise HTTPException(status_code=500, detail="Failed to delete subscription plan")
+            
+            return {
+                "message": "Subscription plan deleted successfully",
+                "plan_id": plan_id,
+                "plan_name": plan.name
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error deleting subscription plan: {str(e)}")        
+        
+    def get_all_feedback(self, page: int = 1, limit: int = 20, rating: Optional[str] = None) -> Dict[str, Any]:
+        """Get all feedback with pagination and filtering"""
+        try:
+            # Validate input parameters
+            if page < 1:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Page must be greater than 0"
+                )
+            
+            if limit < 1 or limit > 100:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Limit must be between 1 and 100"
+                )
+            
+            # Validate rating if provided
+            if rating and rating not in ['positive', 'negative']:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Rating must be either 'positive' or 'negative'"
+                )
+            
+            # Get feedback from database
+            feedback_list = self.db.get_all_feedback(page, limit, rating)
+            
+            # Calculate pagination metadata
+            total_feedback = self.db.get_total_feedback_count(rating)
+            total_pages = (total_feedback + limit - 1) // limit if total_feedback > 0 else 1
+            
+            return {
+                "feedback": feedback_list,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": total_feedback,
+                    "pages": total_pages,
+                    "has_next": page < total_pages,
+                    "has_prev": page > 1
+                }
+            }
+            
+        except HTTPException:
+            # Re-raise HTTP exceptions
+            raise
+        except Exception as e:
+            # Log the error for debugging
+            print(f"Error in get_all_feedback service: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail="Unable to fetch feedback data"
+            )
     def get_feedback_statistics(self) -> Dict[str, Any]:
         """Get feedback statistics"""
         try:
@@ -309,7 +452,152 @@ class AdminService:
                 "recently_expired": recently_expired
             }
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error fetching subscription reminders: {str(e)}")
+            raise HTT
+            
 
+
+    # Add these methods to your AdminService class
+    def get_ai_models(self) -> Dict[str, Any]:
+        """Get all AI models"""
+        try:
+            models = self.db.get_all_ai_models()
+            return {
+                "models": models,
+                "count": len(models)
+            }
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error fetching AI models: {str(e)}"
+            )
+
+    def create_ai_model(self, name: str, provider: str, model_name: str, 
+                    config: Dict[str, Any], is_active: bool = False) -> Dict[str, Any]:
+        """Create a new AI model configuration"""
+        try:
+            # Validate that config is a dictionary
+            if not isinstance(config, dict):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Config must be a valid JSON object"
+                )
+            
+            # If activating this model, deactivate others first
+            if is_active:
+                active_model = self.db.get_active_ai_model()
+                if active_model:
+                    self.db.activate_ai_model(0)  # Deactivate all first
+            
+            model_id = self.db.create_ai_model(name, provider, model_name, config, is_active)
+            
+            return {
+                "message": "AI model created successfully",
+                "model_id": model_id,
+                "name": name,
+                "provider": provider,
+                "is_active": is_active
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error creating AI model: {str(e)}"
+            )
+
+    def activate_ai_model(self, model_id: int) -> Dict[str, Any]:
+        """Activate an AI model"""
+        try:
+            # First check if model exists
+            all_models = self.db.get_all_ai_models()
+            model_exists = any(model.id == model_id for model in all_models)
+            
+            if not model_exists:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"AI model with ID {model_id} not found"
+                )
+            
+            success = self.db.activate_ai_model(model_id)
+            
+            if not success:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to activate AI model"
+                )
+            
+            return {
+                "message": "AI model activated successfully",
+                "model_id": model_id,
+                "active": True
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error activating AI model: {str(e)}"
+            )
+
+    def get_active_ai_model(self) -> Dict[str, Any]:
+        """Get the currently active AI model"""
+        try:
+            active_model = self.db.get_active_ai_model()
+            
+            if not active_model:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="No active AI model found"
+                )
+            
+            return {
+                "active_model": active_model,
+                "message": "Active AI model retrieved successfully"
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error fetching active AI model: {str(e)}"
+            )
+
+    def delete_ai_model(self, model_id: int) -> Dict[str, Any]:
+        """Delete an AI model configuration"""
+        try:
+            # First check if this is the active model
+            active_model = self.db.get_active_ai_model()
+            if active_model and active_model.id == model_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot delete the active AI model. Activate another model first."
+                )
+            
+            success = self.db.delete_ai_model(model_id)
+            
+            if not success:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"AI model with ID {model_id} not found"
+                )
+            
+            return {
+                "message": "AI model deleted successfully",
+                "model_id": model_id,
+                "deleted": True
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            if "Cannot delete the active AI model" in str(e):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=str(e)
+                )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error deleting AI model: {str(e)}"
+            )
 # Global admin service instance
 admin_service = AdminService()
+

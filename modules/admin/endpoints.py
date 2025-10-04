@@ -22,6 +22,7 @@ def verify_admin_token(credentials: HTTPAuthorizationCredentials = Depends(secur
 @router.post("/login")
 async def admin_login(email: str = Form(...), password: str = Form(...)):
     """Admin login endpoint"""
+    print("route is hit")
     return admin_service.admin_login(email, password)
 
 @router.post("/register")
@@ -80,19 +81,20 @@ async def create_subscription_plan(
     project_limit: int = Form(...),
     user_limit: int = Form(1),
     action_limit: int = Form(0),
-    features: str = Form("[]"),
+    features: List[str] = Form([]),
     has_free_trial: bool = Form(False),
     trial_days: int = Form(0)
 ):
     """Create a new subscription plan"""
-    features_list = json.loads(features) if features else []
+    
+    print(features)
+
     return admin_service.create_subscription_plan(
         name, description, price_monthly, price_annual, storage_gb,
-        project_limit, user_limit, action_limit, features_list,
+        project_limit, user_limit, action_limit, features,
         has_free_trial, trial_days
     )
-
-@router.put("/subscription/plans/{plan_id}", dependencies=[Depends(verify_admin_token)])
+@router.patch("/subscription/plans/{plan_id}", dependencies=[Depends(verify_admin_token)])
 async def update_subscription_plan(
     plan_id: int,
     name: Optional[str] = Form(None),
@@ -103,17 +105,16 @@ async def update_subscription_plan(
     project_limit: Optional[int] = Form(None),
     user_limit: Optional[int] = Form(None),
     action_limit: Optional[int] = Form(None),
-    features: Optional[str] = Form(None),
+    features: Optional[List[str]] = Form(None),  # FastAPI can handle list in Form data
     is_active: Optional[bool] = Form(None)
 ):
-    """Update a subscription plan"""
-    features_list = json.loads(features) if features else None
+    """Update a subscription plan (partial update)"""
+    # No need for manual JSON parsing for features list
     return admin_service.update_subscription_plan(
         plan_id, name, description, price_monthly, price_annual,
         storage_gb, project_limit, user_limit, action_limit,
-        features_list, is_active
+        features, is_active  # Pass the list directly
     )
-
 @router.delete("/subscription/plans/{plan_id}", dependencies=[Depends(verify_admin_token)])
 async def delete_subscription_plan(plan_id: int):
     """Delete a subscription plan"""
@@ -132,11 +133,15 @@ async def get_all_feedback(
 async def get_feedback_statistics():
     """Get feedback statistics (percentage of positive/negative)"""
     return admin_service.get_feedback_statistics()
-
 @router.get("/ai/models", dependencies=[Depends(verify_admin_token)])
 async def get_ai_models():
     """Get all AI models"""
     return admin_service.get_ai_models()
+
+@router.get("/ai/models/active", dependencies=[Depends(verify_admin_token)])
+async def get_active_ai_model():
+    """Get the currently active AI model"""
+    return admin_service.get_active_ai_model()
 
 @router.post("/ai/models", dependencies=[Depends(verify_admin_token)])
 async def create_ai_model(
@@ -147,14 +152,25 @@ async def create_ai_model(
     is_active: bool = Form(False)
 ):
     """Create a new AI model configuration"""
-    config_dict = json.loads(config) if config else {}
-    return admin_service.create_ai_model(name, provider, model_name, config_dict, is_active)
+    try:
+        config_dict = json.loads(config) if config else {}
+        return admin_service.create_ai_model(name, provider, model_name, config_dict, is_active)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON in config field"
+        )
 
 @router.patch("/ai/models/{model_id}/activate", dependencies=[Depends(verify_admin_token)])
 async def activate_ai_model(model_id: int):
     """Activate an AI model"""
     return admin_service.activate_ai_model(model_id)
 
+@router.delete("/ai/models/{model_id}", dependencies=[Depends(verify_admin_token)])
+async def delete_ai_model(model_id: int):
+    """Delete an AI model configuration"""
+    return admin_service.delete_ai_model(model_id)
+    
 @router.get("/dashboard/stats", dependencies=[Depends(verify_admin_token)])
 async def get_dashboard_statistics():
     """Get admin dashboard statistics"""
