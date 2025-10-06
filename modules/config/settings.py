@@ -43,7 +43,7 @@ class Settings:
     # Roboflow Configuration
     ROBOFLOW_API_URL = "https://serverless.roboflow.com"
     ROBOFLOW_API_KEY = "vVIEhzGbQzi4RDzrfvgd"
-    ROBOFLOW_MODEL_ID = "full-set-menu/5"
+    ROBOFLOW_MODEL_ID = "esticore-floorplan-68jz3/3"
     
     # Tavily Configuration
     TAVILY_API_KEY = os.getenv('TAVILY_API_KEY')
