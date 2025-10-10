@@ -63,6 +63,7 @@ async def unified_agent(
         raise HTTPException(404, detail="Document not found")
     
     # Handle different storage types
+    pdf_path = None
     if doc_info.get("storage_type") == "database":
         # For database storage, we need to get the PDF content from the database
         try:
@@ -109,18 +110,6 @@ async def unified_agent(
     # Add user message to chat history with context
     session_manager.add_message_to_session(session_id, user_id, "user", user_instruction)
     
-    # Generate unique output path for potential annotations
-    output_filename = f"{doc_id}_page_{page_number}_{uuid.uuid4().hex[:8]}_unified.pdf"
-    
-    # Handle case where OUTPUT_DIR is None (database storage)
-    if settings.OUTPUT_DIR is None:
-        import tempfile
-        output_pdf_path = os.path.join(tempfile.gettempdir(), output_filename)
-    else:
-        output_pdf_path = os.path.join(settings.OUTPUT_DIR, output_filename)
-        # Ensure output directory exists
-        os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
-    
     # Simple instruction for the agent - let the workflow handle tool selection
     simple_instruction = f"""
 Document ID: {doc_id}
@@ -134,7 +123,6 @@ Please handle this request using the most appropriate tool.
         "messages": [HumanMessage(content=simple_instruction)],
         "pdf_path": pdf_path,
         "page_number": page_number,
-        "output_path": output_pdf_path,
     }
     
     try:
@@ -144,182 +132,87 @@ Please handle this request using the most appropriate tool.
         
         # Save assistant response to chat history
         session_manager.add_message_to_session(session_id, user_id, "assistant", final_msg)
-        
-        # Check if annotation was performed (PDF file created)
-        output_id = None
-        if os.path.exists(output_pdf_path):
-            print(f"DEBUG: Annotation completed. PDF file created at: {output_pdf_path}")
+
+        # Handle the agent's response
+        try:
+            # Attempt to parse the agent's entire output as JSON
+            parsed_data = json.loads(final_msg)
             
-            # If using database storage, move the file to database
-            if pdf_processor.use_database_storage:
-                try:
-                    # Read the generated file
-                    with open(output_pdf_path, 'rb') as f:
-                        output_data = f.read()
-                    
-                    # Store in database
-                    output_id = pdf_processor.store_generated_output(
-                        output_data=output_data,
-                        filename=output_filename,
-                        source_doc_id=doc_id,
-                        user_id=user_id,
-                        metadata={
-                            "type": "unified_annotation",
-                            "page_number": page_number,
-                            "session_id": session_id
-                        }
-                    )
-                    
-                    # Remove local file
-                    os.remove(output_pdf_path)
-                    print(f"DEBUG: Moved annotation to database with output_id: {output_id}")
-                    
-                except Exception as e:
-                    print(f"DEBUG: Error moving annotation to database: {e}")
-                    # Fall back to file cleanup
-                    background_tasks.add_task(delete_file_after_delay, output_pdf_path, settings.CHAT_FILE_DELETE_DELAY)
+            # Case 1: It's the new annotation format
+            if isinstance(parsed_data, dict) and 'annotations' in parsed_data:
+                print("DEBUG: Annotation JSON response detected.")
+                response_data = {
+                    "response": parsed_data.get("message", "Annotations generated successfully."),
+                    "session_id": session_id,
+                    "doc_id": doc_id,
+                    "page": page_number,
+                    "type": "annotation",
+                    "annotation_status": "completed",
+                    "annotations": parsed_data.get("annotations", []),
+                    "annotation_count": len(parsed_data.get("annotations", [])),
+                    "detected_objects": parsed_data.get("detected_objects", []),
+                    "message": parsed_data.get("message", "Generated annotations successfully")
+                }
+                return JSONResponse(content=response_data)
+            
+            # Case 2: It's a RAG/informational JSON format
+            elif isinstance(parsed_data, dict) and 'answer' in parsed_data:
+                print("DEBUG: RAG JSON response detected.")
+                response_content = {
+                    "response": parsed_data.get("answer", "No answer found."),
+                    "session_id": session_id,
+                    "doc_id": doc_id,
+                    "page": page_number,
+                    "type": "information",
+                    "suggestions": parsed_data.get("suggestions", []),
+                    "citations": parsed_data.get("citations", []),
+                    "most_referenced_page": parsed_data.get("most_referenced_page")
+                }
+                return JSONResponse(content=response_content)
+
+            # Case 3: It's some other JSON, treat as informational
             else:
-                # Add cleanup task for file storage
-                background_tasks.add_task(delete_file_after_delay, output_pdf_path, settings.CHAT_FILE_DELETE_DELAY)
-            
-            # Return JSON response with annotation details
-            response_data = {
-                "response": final_msg,
-                "session_id": session_id,
-                "doc_id": doc_id,
-                "page": page_number,
-                "type": "annotation",
-                "annotation_status": "completed",
-                "annotated_file_id": output_filename,
-                "message": "Annotation completed successfully"
-            }
-            
-            # Add appropriate file reference
-            if output_id:
-                response_data["output_id"] = output_id
-                response_data["download_url"] = f"/download/output/{output_id}"
-            else:
-                response_data["annotated_file_path"] = output_pdf_path
-            
-            return JSONResponse(content=response_data)
-        else:
-            print(f"DEBUG: No annotation file created. Returning information response.")
-            
-            # Try to parse the response for suggestions
-            suggestions = []
-            citations = []
-            most_referenced_page = None
+                raise json.JSONDecodeError("Not a recognized JSON format", final_msg, 0)
+
+        except json.JSONDecodeError:
+            # Case 4: The response is not JSON, so it's a plain text informational response.
+            print("DEBUG: Non-JSON response detected. Treating as informational text.")
             answer_text = final_msg
+            suggestions = extract_manual_suggestions(answer_text)
             
-            # Check if the response contains JSON from answer_question_with_suggestions
-            try:
-                # Look for JSON pattern in the response - try multiple patterns
-                json_patterns = [
-                    r'\{.*"answer".*"suggestions".*\}',  # Full JSON object with suggestions
-                    r'\{.*"answer".*"citations".*\}',   # Full JSON object with citations
-                    r'\{[^}]*"answer"[^}]*"suggestions"[^}]*\}',  # More specific pattern
-                ]
-                
-                parsed_response = None
-                
-                for pattern in json_patterns:
-                    json_match = re.search(pattern, final_msg, re.DOTALL)
-                    if json_match:
-                        json_str = json_match.group(0)
-                        try:
-                            parsed_response = json.loads(json_str)
-                            break
-                        except json.JSONDecodeError:
-                            continue
-                
-                # If we found a valid JSON response, extract the data
-                if parsed_response and isinstance(parsed_response, dict):
-                    if "answer" in parsed_response:
-                        answer_text = parsed_response["answer"]
-                        suggestions = parsed_response.get("suggestions", [])
-                        citations = parsed_response.get("citations", [])
-                        most_referenced_page = parsed_response.get("most_referenced_page")
-                        
-                        # Ensure suggestions is always a list
-                        if not isinstance(suggestions, list):
-                            suggestions = []
-                        
-                        # Ensure citations is always a list
-                        if not isinstance(citations, list):
-                            citations = []
-                            
-                        print(f"DEBUG: Extracted {len(suggestions)} suggestions and {len(citations)} citations from JSON response")
-                        print(f"DEBUG: Most referenced page: {most_referenced_page}")
-                    else:
-                        print("DEBUG: JSON found but no 'answer' key")
-                else:
-                    print("DEBUG: No valid JSON response found, attempting to parse manual suggestions from text")
-                    
-                    # If no JSON found, try to extract manually formatted suggestions from the text
-                    suggestions = extract_manual_suggestions(final_msg)
-                    
-                    # If we found manual suggestions, clean up the answer text
-                    if suggestions:
-                        # Remove the suggestions section from the answer text
-                        # Look for patterns like "Here are some related topics:"
-                        split_patterns = [
-                            r'\n\nHere are some related topics.*',
-                            r'\n\nRelated topics.*',
-                            r'\n\n\d+\. \*\*.*',
-                            r'\n\nIf you have any specific questions.*'
-                        ]
-                        
-                        for pattern in split_patterns:
-                            match = re.search(pattern, answer_text, re.DOTALL | re.IGNORECASE)
-                            if match:
-                                answer_text = answer_text[:match.start()].strip()
-                                break
-                    
-            except Exception as e:
-                print(f"DEBUG: Error parsing response: {e}")
-                # If parsing fails, treat the entire response as the answer
-                pass
+            if suggestions:
+                split_patterns = [r'\n\nHere are some related topics.*', r'\n\nRelated topics.*', r'\n\n\d+\. \*\*.*']
+                for pattern in split_patterns:
+                    match = re.search(pattern, answer_text, re.DOTALL | re.IGNORECASE)
+                    if match:
+                        answer_text = answer_text[:match.start()].strip()
+                        break
             
-            # For RAG/information requests, return JSON response with suggestions and citations
             response_content = {
                 "response": answer_text,
                 "session_id": session_id,
                 "doc_id": doc_id,
                 "page": page_number,
                 "type": "information",
-                "suggestions": suggestions,  # Always include suggestions array (empty if none)
-                "citations": citations,      # Include citations array (empty if none)
+                "suggestions": suggestions,
+                "citations": []
             }
-            
-            # Add most_referenced_page if available
-            if most_referenced_page is not None:
-                response_content["most_referenced_page"] = most_referenced_page
-            
             return JSONResponse(content=response_content)
             
     except Exception as e:
         error_msg = f"Error processing request: {str(e)}"
         print(f"DEBUG: Exception occurred in unified agent: {str(e)}")
-        
-        # Save error to chat history
         session_manager.add_message_to_session(session_id, user_id, "assistant", error_msg)
-        
         return JSONResponse(
-            content={
-                "response": error_msg,
-                "session_id": session_id,
-                "doc_id": doc_id,
-                "type": "error"
-            },
+            content={"response": error_msg, "session_id": session_id, "doc_id": doc_id, "type": "error"},
             status_code=500
         )
     finally:
-        # Clean up temporary PDF file if it was created for database storage
-        if doc_info.get("storage_type") == "database" and 'pdf_path' in locals():
+        # Clean up temporary PDF file if it was created
+        if doc_info.get("storage_type") == "database" and pdf_path and os.path.exists(pdf_path):
             try:
-                if os.path.exists(pdf_path):
-                    os.remove(pdf_path)
-                    print(f"DEBUG: Cleaned up temporary PDF file: {pdf_path}")
+                os.remove(pdf_path)
+                print(f"DEBUG: Cleaned up temporary PDF file: {pdf_path}")
             except Exception as e:
                 print(f"DEBUG: Error cleaning up temporary PDF file: {e}")
 
@@ -373,14 +266,6 @@ async def unified_agent_for_project(
     """
     Project-aware unified endpoint that works with project context.
     Automatically extracts the document from the project and provides project context.
-    
-    Args:
-        project_id: The project identifier
-        user_instruction: The user's instruction/query
-        user_id: The user's ID for authentication
-        session_id: Optional session ID for conversation continuity
-        doc_id: Optional specific document ID to use from the project.
-                If not provided, uses the first document in the project.
     """
     # Validate project access
     if not project_service.validate_project_access(project_id, user_id):
@@ -394,17 +279,14 @@ async def unified_agent_for_project(
     # Select the document to use
     selected_document = None
     if doc_id:
-        # Find the specific document in the project
         for doc in project["documents"]:
             if doc["doc_id"] == doc_id:
                 selected_document = doc
                 break
-        
         if not selected_document:
             available_docs = [doc["doc_id"] for doc in project["documents"]]
             raise HTTPException(400, detail=f"Document {doc_id} not found in project. Available documents: {available_docs}")
     else:
-        # Use the first document if no specific doc_id provided
         selected_document = project["documents"][0]
     
     final_doc_id = selected_document["doc_id"]
@@ -416,11 +298,10 @@ async def unified_agent_for_project(
         raise HTTPException(404, detail="Document not found")
     
     # Handle different storage types
+    pdf_path = None
     if doc_info.get("storage_type") == "database":
-        # For database storage, we need to get the PDF content from the database
         try:
             pdf_content = pdf_processor.get_document_content(final_doc_id)
-            # Create a temporary file for processing
             import tempfile
             with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_file:
                 temp_file.write(pdf_content)
@@ -428,53 +309,34 @@ async def unified_agent_for_project(
         except Exception as e:
             raise HTTPException(500, detail=f"Failed to retrieve document content: {str(e)}")
     else:
-        # For legacy file storage
         pdf_path = doc_info.get("pdf_path")
         if not pdf_path:
             raise HTTPException(404, detail="Document file path not found")
     
-    # Extract page number from instruction or default to 1
+    # Extract page number
     page_number = 1
     page_match = re.search(r'page\s+(\d+)', user_instruction.lower())
     if page_match:
         page_number = int(page_match.group(1))
     
-    # Resolve context for session management (project context)
+    # Resolve and validate context
     context_data = {'project_id': project_id, 'doc_id': final_doc_id}
     context_type, context_id = context_resolver.resolve_context(context_data)
-    
-    # Validate context access
     context_resolver.validate_context_access_with_exception(user_id, context_type, context_id)
     
-    # Get or create context-aware session
+    # Get or create session
     if session_id:
-        # Validate existing session access
         if not session_manager.validate_session_access(session_id, user_id):
-            # Create new session if access validation fails
             session_id = session_manager.get_or_create_session(user_id, context_type, context_id)
         else:
-            # Update activity for existing session
             session_manager.update_session_activity(session_id)
     else:
-        # Create new session with context
         session_id = session_manager.get_or_create_session(user_id, context_type, context_id)
     
-    # Add user message to chat history with context
+    # Add message to history
     session_manager.add_message_to_session(session_id, user_id, "user", user_instruction)
     
-    # Generate unique output path for potential annotations
-    output_filename = f"{project_id}_{final_doc_id}_page_{page_number}_{uuid.uuid4().hex[:8]}_project.pdf"
-    
-    # Handle case where OUTPUT_DIR is None (database storage)
-    if settings.OUTPUT_DIR is None:
-        import tempfile
-        output_pdf_path = os.path.join(tempfile.gettempdir(), output_filename)
-    else:
-        output_pdf_path = os.path.join(settings.OUTPUT_DIR, output_filename)
-        # Ensure output directory exists
-        os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
-    
-    # Simple instruction for the agent with project context
+    # Prepare agent instruction
     simple_instruction = f"""
 Project Context:
 - Project ID: {project_id}
@@ -492,155 +354,73 @@ Please handle this request using the most appropriate tool.
         "messages": [HumanMessage(content=simple_instruction)],
         "pdf_path": pdf_path,
         "page_number": page_number,
-        "output_path": output_pdf_path,
     }
     
     try:
-        print(f"DEBUG: Starting project agent for project {project_id}, document {final_doc_id} with instruction: {user_instruction}")
+        print(f"DEBUG: Starting project agent for project {project_id}, doc {final_doc_id}")
         final_state = agent_workflow.process_request(initial_state)
         final_msg = final_state["messages"][-1].content
         
-        # Save assistant response to chat history
+        # Save assistant response
         session_manager.add_message_to_session(session_id, user_id, "assistant", final_msg)
         
-        # Check if annotation was performed (PDF file created)
-        output_id = None
-        if os.path.exists(output_pdf_path):
-            print(f"DEBUG: Annotation completed. PDF file created at: {output_pdf_path}")
+        # Handle agent response
+        try:
+            parsed_data = json.loads(final_msg)
             
-            # If using database storage, move the file to database
-            if pdf_processor.use_database_storage:
-                try:
-                    # Read the generated file
-                    with open(output_pdf_path, 'rb') as f:
-                        output_data = f.read()
-                    
-                    # Store in database
-                    output_id = pdf_processor.store_generated_output(
-                        output_data=output_data,
-                        filename=output_filename,
-                        source_doc_id=final_doc_id,
-                        user_id=user_id,
-                        metadata={
-                            "type": "project_annotation",
-                            "page_number": page_number,
-                            "project_id": project_id,
-                            "session_id": session_id
-                        }
-                    )
-                    
-                    # Remove local file
-                    os.remove(output_pdf_path)
-                    print(f"DEBUG: Moved project annotation to database with output_id: {output_id}")
-                    
-                except Exception as e:
-                    print(f"DEBUG: Error moving project annotation to database: {e}")
-                    # Fall back to file cleanup
-                    background_tasks.add_task(delete_file_after_delay, output_pdf_path, settings.CHAT_FILE_DELETE_DELAY)
+            # Case 1: Annotation JSON
+            if isinstance(parsed_data, dict) and 'annotations' in parsed_data:
+                print("DEBUG: Project annotation JSON response detected.")
+                response_data = {
+                    "response": parsed_data.get("message", "Annotations generated successfully."),
+                    "session_id": session_id,
+                    "project_id": project_id,
+                    "doc_id": final_doc_id,
+                    "page": page_number,
+                    "type": "annotation",
+                    "annotation_status": "completed",
+                    "annotations": parsed_data.get("annotations", []),
+                    "annotation_count": len(parsed_data.get("annotations", [])),
+                    "detected_objects": parsed_data.get("detected_objects", []),
+                    "message": parsed_data.get("message", "Generated annotations successfully"),
+                    "project_context": {"name": project["name"], "description": project["description"]}
+                }
+                return JSONResponse(content=response_data)
+            
+            # Case 2: RAG/informational JSON
+            elif isinstance(parsed_data, dict) and 'answer' in parsed_data:
+                print("DEBUG: Project RAG JSON response detected.")
+                response_content = {
+                    "response": parsed_data.get("answer", "No answer found."),
+                    "session_id": session_id,
+                    "project_id": project_id,
+                    "doc_id": final_doc_id,
+                    "page": page_number,
+                    "type": "information",
+                    "suggestions": parsed_data.get("suggestions", []),
+                    "citations": parsed_data.get("citations", []),
+                    "most_referenced_page": parsed_data.get("most_referenced_page"),
+                    "project_context": {"name": project["name"], "description": project["description"]}
+                }
+                return JSONResponse(content=response_content)
+            
             else:
-                # Add cleanup task for file storage
-                background_tasks.add_task(delete_file_after_delay, output_pdf_path, settings.CHAT_FILE_DELETE_DELAY)
-            
-            # Return JSON response with annotation details
-            response_data = {
-                "response": final_msg,
-                "session_id": session_id,
-                "project_id": project_id,
-                "doc_id": final_doc_id,
-                "page": page_number,
-                "type": "annotation",
-                "annotation_status": "completed",
-                "annotated_file_id": output_filename,
-                "message": "Annotation completed successfully"
-            }
-            
-            # Add appropriate file reference
-            if output_id:
-                response_data["output_id"] = output_id
-                response_data["download_url"] = f"/download/output/{output_id}"
-            else:
-                response_data["annotated_file_path"] = output_pdf_path
-            
-            return JSONResponse(content=response_data)
-        else:
-            print(f"DEBUG: No annotation file created. Returning information response.")
-            
-            # Try to parse the response for suggestions (same logic as unified endpoint)
-            suggestions = []
-            citations = []
-            most_referenced_page = None
+                raise json.JSONDecodeError("Not a recognized JSON format", final_msg, 0)
+        
+        except json.JSONDecodeError:
+            # Case 3: Plain text response
+            print("DEBUG: Project non-JSON response detected.")
             answer_text = final_msg
+            suggestions = extract_manual_suggestions(answer_text)
             
-            # Check if the response contains JSON from answer_question_with_suggestions
-            try:
-                # Look for JSON pattern in the response - try multiple patterns
-                json_patterns = [
-                    r'\{.*"answer".*"suggestions".*\}',  # Full JSON object with suggestions
-                    r'\{.*"answer".*"citations".*\}',   # Full JSON object with citations
-                    r'\{[^}]*"answer"[^}]*"suggestions"[^}]*\}',  # More specific pattern
-                ]
-                
-                parsed_response = None
-                
-                for pattern in json_patterns:
-                    json_match = re.search(pattern, final_msg, re.DOTALL)
-                    if json_match:
-                        json_str = json_match.group(0)
-                        try:
-                            parsed_response = json.loads(json_str)
-                            break
-                        except json.JSONDecodeError:
-                            continue
-                
-                # If we found a valid JSON response, extract the data
-                if parsed_response and isinstance(parsed_response, dict):
-                    if "answer" in parsed_response:
-                        answer_text = parsed_response["answer"]
-                        suggestions = parsed_response.get("suggestions", [])
-                        citations = parsed_response.get("citations", [])
-                        most_referenced_page = parsed_response.get("most_referenced_page")
-                        
-                        # Ensure suggestions is always a list
-                        if not isinstance(suggestions, list):
-                            suggestions = []
-                        
-                        # Ensure citations is always a list
-                        if not isinstance(citations, list):
-                            citations = []
-                            
-                        print(f"DEBUG: Extracted {len(suggestions)} suggestions and {len(citations)} citations from JSON response")
-                        print(f"DEBUG: Most referenced page: {most_referenced_page}")
-                    else:
-                        print("DEBUG: JSON found but no 'answer' key")
-                else:
-                    print("DEBUG: No valid JSON response found, attempting to parse manual suggestions from text")
-                    
-                    # If no JSON found, try to extract manually formatted suggestions from the text
-                    suggestions = extract_manual_suggestions(final_msg)
-                    
-                    # If we found manual suggestions, clean up the answer text
-                    if suggestions:
-                        # Remove the suggestions section from the answer text
-                        # Look for patterns like "Here are some related topics:"
-                        split_patterns = [
-                            r'\n\nHere are some related topics.*',
-                            r'\n\nRelated topics.*',
-                            r'\n\n\d+\. \*\*.*',
-                            r'\n\nIf you have any specific questions.*'
-                        ]
-                        
-                        for pattern in split_patterns:
-                            match = re.search(pattern, answer_text, re.DOTALL | re.IGNORECASE)
-                            if match:
-                                answer_text = answer_text[:match.start()].strip()
-                                break
-                    
-            except Exception as e:
-                print(f"DEBUG: Error parsing response: {e}")
-                # If parsing fails, treat the entire response as the answer
-                pass
+            if suggestions:
+                split_patterns = [r'\n\nHere are some related topics.*', r'\n\nRelated topics.*', r'\n\n\d+\. \*\*.*']
+                for pattern in split_patterns:
+                    match = re.search(pattern, answer_text, re.DOTALL | re.IGNORECASE)
+                    if match:
+                        answer_text = answer_text[:match.start()].strip()
+                        break
             
-            # For RAG/information requests, return JSON response with suggestions, citations and project context
             response_content = {
                 "response": answer_text,
                 "session_id": session_id,
@@ -648,42 +428,25 @@ Please handle this request using the most appropriate tool.
                 "doc_id": final_doc_id,
                 "page": page_number,
                 "type": "information",
-                "suggestions": suggestions,  # Always include suggestions array (empty if none)
-                "citations": citations,      # Include citations array (empty if none)
-                "project_context": {
-                    "name": project["name"],
-                    "description": project["description"]
-                }
+                "suggestions": suggestions,
+                "citations": [],
+                "project_context": {"name": project["name"], "description": project["description"]}
             }
-            
-            # Add most_referenced_page if available
-            if most_referenced_page is not None:
-                response_content["most_referenced_page"] = most_referenced_page
-            
             return JSONResponse(content=response_content)
             
     except Exception as e:
         error_msg = f"Error processing request: {str(e)}"
         print(f"DEBUG: Exception occurred in project agent: {str(e)}")
-        
-        # Save error to chat history
         session_manager.add_message_to_session(session_id, user_id, "assistant", error_msg)
-        
         return JSONResponse(
-            content={
-                "response": error_msg,
-                "session_id": session_id,
-                "project_id": project_id,
-                "type": "error"
-            },
+            content={"response": error_msg, "session_id": session_id, "project_id": project_id, "type": "error"},
             status_code=500
         )
     finally:
-        # Clean up temporary PDF file if it was created for database storage
-        if doc_info.get("storage_type") == "database" and 'pdf_path' in locals():
+        # Clean up temporary PDF file if it was created
+        if doc_info.get("storage_type") == "database" and pdf_path and os.path.exists(pdf_path):
             try:
-                if os.path.exists(pdf_path):
-                    os.remove(pdf_path)
-                    print(f"DEBUG: Cleaned up temporary PDF file: {pdf_path}")
+                os.remove(pdf_path)
+                print(f"DEBUG: Cleaned up temporary PDF file: {pdf_path}")
             except Exception as e:
                 print(f"DEBUG: Error cleaning up temporary PDF file: {e}")
