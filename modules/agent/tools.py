@@ -702,6 +702,14 @@ def generate_frontend_annotations(
         return json.dumps({"error": "Invalid JSON format for detected objects."})
     except Exception as e:
         return json.dumps({"error": f"Error generating annotations: {str(e)}"})
+    finally:
+        # Clean up the temporary image file
+        if os.path.exists(image_path):
+            try:
+                os.remove(image_path)
+                print(f"DEBUG: Cleaned up temporary image file: {image_path}")
+            except Exception as e:
+                print(f"DEBUG: Error cleaning up temporary image file {image_path}: {e}")
 
 @tool
 def verify_detections(image_path: str, objects_json: str, requested_object: str) -> str:
