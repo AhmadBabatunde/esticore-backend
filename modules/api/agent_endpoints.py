@@ -153,6 +153,8 @@ Please handle this request using the most appropriate tool.
                     "detected_objects": parsed_data.get("detected_objects", []),
                     "message": parsed_data.get("message", "Generated annotations successfully")
                 }
+                if 'coordinate_space' in parsed_data:
+                    response_data['coordinate_space'] = parsed_data['coordinate_space']
                 return JSONResponse(content=response_data)
             
             # Case 2: It's a RAG/informational JSON format
@@ -385,6 +387,8 @@ Please handle this request using the most appropriate tool.
                     "message": parsed_data.get("message", "Generated annotations successfully"),
                     "project_context": {"name": project["name"], "description": project["description"]}
                 }
+                if 'coordinate_space' in parsed_data:
+                    response_data['coordinate_space'] = parsed_data['coordinate_space']
                 return JSONResponse(content=response_data)
             
             # Case 2: RAG/informational JSON

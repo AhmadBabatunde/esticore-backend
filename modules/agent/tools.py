@@ -520,10 +520,20 @@ def convert_pdf_page_to_image(pdf_path: str, page: int = 1, dpi: int = 300) -> s
             return f"Error: Page {page} not found in PDF."
 
         temp_image_path = f"temp_floor_plan_page_{page}.png"
-        images[0].save(temp_image_path, "PNG")
+        image = images[0]
+        image.save(temp_image_path, "PNG")
+
+        width, height = image.size
 
         print(f"DEBUG: Temporary image saved to {temp_image_path}")
-        return json.dumps({"success": True, "image_path": temp_image_path, "page": page})
+        return json.dumps({
+            "success": True,
+            "image_path": temp_image_path,
+            "page": page,
+            "width": width,
+            "height": height,
+            "dpi": dpi
+        })
     except Exception as e:
         return json.dumps({"success": False, "error": f"Error converting PDF to image: {str(e)}"})
 
@@ -565,6 +575,8 @@ def generate_frontend_annotations(
     objects_json: str, 
     page_number: int, 
     annotation_type: str, 
+    image_path: str,
+    dpi: int,
     filter_condition: str = ""
 ) -> str:
     """
@@ -574,6 +586,8 @@ def generate_frontend_annotations(
         objects_json: JSON string of detected objects from detect_floor_plan_objects.
         page_number: The page number where the annotations should be applied.
         annotation_type: The type of annotation to generate. Supported types: 'highlight', 'rectangle', 'circle', 'count', 'arrow'.
+        image_path: The path to the image that was used for detection.
+        dpi: The DPI of the image that was used for detection.
         filter_condition: A string to filter which objects to annotate (e.g., 'door', 'window'). Annotates all objects if empty.
     
     Returns:
@@ -583,6 +597,10 @@ def generate_frontend_annotations(
         all_objects = json.loads(objects_json)
         if not isinstance(all_objects, list):
             return json.dumps({"error": "Objects data must be a list of detected objects."})
+
+        # Get image dimensions for coordinate space metadata
+        with Image.open(image_path) as img:
+            width, height = img.size
 
         # Filter objects
         if filter_condition:
@@ -625,16 +643,16 @@ def generate_frontend_annotations(
         for i, obj in enumerate(objects_to_annotate, 1):
             bbox = obj['bbox']
             x1, y1, x2, y2 = bbox
-            width = x2 - x1
-            height = y2 - y1
+            obj_width = x2 - x1
+            obj_height = y2 - y1
             
             annotation = {
                 "id": str(uuid.uuid4()),
                 "tool": tool_id,
                 "x": float(x1),
                 "y": float(y1),
-                "width": float(width),
-                "height": float(height),
+                "width": float(obj_width),
+                "height": float(obj_height),
                 "color": color_map.get(annotation_type.lower(), "#000000"),
                 "lineWidth": 2.0,
                 "timestamp": int(datetime.now().timestamp()),
@@ -651,14 +669,14 @@ def generate_frontend_annotations(
                 # make the count "box" smaller and centered
                 annotation['width'] = 20.0
                 annotation['height'] = 20.0
-                annotation['x'] = float(x1 + (width / 2) - 10)
-                annotation['y'] = float(y1 + (height / 2) - 10)
+                annotation['x'] = float(x1 + (obj_width / 2) - 10)
+                annotation['y'] = float(y1 + (obj_height / 2) - 10)
             
             if annotation_type.lower() == 'arrow':
-                center_x = x1 + width / 2
-                center_y = y1 + height / 2
-                start_x = x1 - 30 if x1 > 30 else x1 + width + 30
-                start_y = y1 - 30 if y1 > 30 else y1 + height + 30
+                center_x = x1 + obj_width / 2
+                center_y = y1 + obj_height / 2
+                start_x = x1 - 30 if x1 > 30 else x1 + obj_width + 30
+                start_y = y1 - 30 if y1 > 30 else y1 + obj_height + 30
                 annotation['points'] = [float(start_x), float(start_y), float(center_x), float(center_y)]
                 del annotation['x'], annotation['y'], annotation['width'], annotation['height']
 
@@ -667,7 +685,16 @@ def generate_frontend_annotations(
         response_data = {
             "annotations": annotations,
             "detected_objects": all_objects,
-            "message": f"Generated {len(annotations)} annotations of type '{annotation_type}' successfully."
+            "message": f"Generated {len(annotations)} annotations of type '{annotation_type}' successfully.",
+            "coordinate_space": {
+                "system": "pixel",
+                "origin": "top-left",
+                "reference": "rasterized_page",
+                "width": width,
+                "height": height,
+                "dpi": dpi,
+                "rotation": 0
+            }
         }
         
         return json.dumps(response_data, indent=2)
