@@ -171,6 +171,9 @@ You are an expert Civil Engineering AI assistant for working with floor plan doc
 -   NEVER include download URLs or file paths in responses.
 -   NEVER use markdown links like [here](file://path) or [Download](path).
 
+IMPORTANT ADDITION FOR ANNOTATION ERRORS:
+-   If the user requests an annotation filtered by an object type (for example: "highlight doors", "box windows", "circle chairs") and the `detect_floor_plan_objects` tool returns no objects that match the requested filter, return conversational text that say object not found that is very responsive.
+-   And include the list of detected object types on the page to help the user refine their request and also clean up the temp image.
 **ANNOTATION WORKFLOW EXAMPLE:**
 1.  User: "Highlight all the doors on page 2."
 2.  Agent calls `convert_pdf_page_to_image`
@@ -178,7 +181,7 @@ You are an expert Civil Engineering AI assistant for working with floor plan doc
 4.  Agent calls `detect_floor_plan_objects`.
 5.  Agent receives JSON of detected objects.
 6.  Agent calls `generate_frontend_annotations` with `objects_json` from step 3, `page_number=2`, `annotation_type='highlight'`, and `filter_condition='door'`.
-7.  Agent's final response is the JSON string returned by `generate_frontend_annotations`.
+7.  Agent's final response must ALLWAYS be a JSON string returned by `generate_frontend_annotations`.
 
 **CRITICAL RULES:**
 -   For annotation, you MUST follow the two-step `detect` -> `generate` process.
@@ -197,8 +200,22 @@ You are an expert Civil Engineering AI assistant for working with floor plan doc
             return "action" if state["messages"][-1].tool_calls else END
 
         def call_agent(state: FloorPlanState):
-            # Add memory context to the state
-            memory_context = self.memory.load_memory_variables({})
+            # Use per-session history if available, otherwise fall back to in-memory history
+            session_id = state.get("session_id")
+            user_id = state.get("user_id")
+            memory_context = {}
+            if session_id and user_id is not None:
+                try:
+                    # get_chat_history returns chronological list of messages for the session
+                    history_msgs = self.get_chat_history(session_id, user_id, limit=20)
+                    formatted = "\n".join([f"{m['role']}: {m['content']}" for m in history_msgs])
+                    if formatted:
+                        memory_context = {"history": formatted}
+                except Exception as e:
+                    print(f"DEBUG: Error loading session history: {e}")
+                    memory_context = self.memory.load_memory_variables({})
+            else:
+                memory_context = self.memory.load_memory_variables({})
 
             # Create a more detailed message that includes state information
             original_message = state["messages"][-1].content if state["messages"] else ""
@@ -227,8 +244,16 @@ You are an expert Civil Engineering AI assistant for working with floor plan doc
 
             response = self.agent_executor.invoke(state_with_context)
 
-            # Save to memory
-            self.memory.save_context({"input": original_message}, {"output": response["output"]})
+            # Persist assistant output to the session history when session info is available
+            if session_id and user_id is not None:
+                try:
+                    # Use the wrapper which will write to DB-backed session if user_id provided
+                    self.add_chat_message(session_id, "assistant", response["output"], user_id)
+                except Exception as e:
+                    print(f"DEBUG: Error saving assistant message to session: {e}")
+            else:
+                # Fallback to in-memory memory for backward compatibility
+                self.memory.save_context({"input": original_message}, {"output": response["output"]})
 
             return {"messages": [AIMessage(content=response["output"])]}
 

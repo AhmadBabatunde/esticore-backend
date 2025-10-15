@@ -123,6 +123,8 @@ Please handle this request using the most appropriate tool.
         "messages": [HumanMessage(content=simple_instruction)],
         "pdf_path": pdf_path,
         "page_number": page_number,
+        "session_id": session_id,
+        "user_id": user_id,
     }
     
     try:
@@ -356,6 +358,8 @@ Please handle this request using the most appropriate tool.
         "messages": [HumanMessage(content=simple_instruction)],
         "pdf_path": pdf_path,
         "page_number": page_number,
+        "session_id": session_id,
+        "user_id": user_id,
     }
     
     try:
