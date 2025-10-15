@@ -203,51 +203,43 @@ IMPORTANT ADDITION FOR ANNOTATION ERRORS:
             # Use per-session history if available, otherwise fall back to in-memory history
             session_id = state.get("session_id")
             user_id = state.get("user_id")
-            memory_context = {}
+            history = ""
             if session_id and user_id is not None:
                 try:
-                    # get_chat_history returns chronological list of messages for the session
                     history_msgs = self.get_chat_history(session_id, user_id, limit=20)
-                    formatted = "\n".join([f"{m['role']}: {m['content']}" for m in history_msgs])
-                    if formatted:
-                        memory_context = {"history": formatted}
+                    history = "\n".join([f"{m['role']}: {m['content']}" for m in history_msgs])
                 except Exception as e:
                     print(f"DEBUG: Error loading session history: {e}")
-                    memory_context = self.memory.load_memory_variables({})
-            else:
-                memory_context = self.memory.load_memory_variables({})
 
-            # Create a more detailed message that includes state information
+            # Get the user's most recent request
             original_message = state["messages"][-1].content if state["messages"] else ""
 
-            # Add state context to help the agent understand what it needs to do
-            context_message = f"""
-            CURRENT STATE CONTEXT:
-            - PDF Path: {state.get('pdf_path', 'Not set')}
-            - Page Number: {state.get('page_number', 'Not set')}
+            # Construct a clear prompt with history first, then the current request
+            prompt_template = f"""
+        PREVIOUS CONVERSATION:
+        {history}
 
-            USER REQUEST: {original_message}
+        CURRENT TASK:
+        - PDF Path: {state.get('pdf_path', 'Not set')}
+        - Page Number: {state.get('page_number', 'Not set')}
+        - User Request: {original_message}
 
-            IMPORTANT: If this is an annotation request, remember the two-step process:
-            1. Call `detect_floor_plan_objects`.
-            2. Call `generate_frontend_annotations` with the results.
-            The final output must be the JSON from `generate_frontend_annotations`.
-            """
+        IMPORTANT: If this is an annotation request, remember the two-step process:
+        1. Call `detect_floor_plan_objects`.
+        2. Call `generate_frontend_annotations` with the results.
+        The final output must be the JSON from `generate_frontend_annotations`.
+        """
 
-            # Update the state with the context message
-            state_with_context = state.copy()
-            state_with_context["messages"] = state["messages"][:-1] + [HumanMessage(content=context_message)]
-
-            if memory_context and "history" in memory_context and memory_context["history"]:
-                # Add memory to the conversation
-                state_with_context["messages"].append(HumanMessage(content=f"Memory context: {memory_context['history']}"))
+            # Create a new state with the structured prompt
+            state_with_context = {
+                "messages": [HumanMessage(content=prompt_template)]
+            }
 
             response = self.agent_executor.invoke(state_with_context)
 
-            # Persist assistant output to the session history when session info is available
+            # Persist assistant output to the session history
             if session_id and user_id is not None:
                 try:
-                    # Use the wrapper which will write to DB-backed session if user_id provided
                     self.add_chat_message(session_id, "assistant", response["output"], user_id)
                 except Exception as e:
                     print(f"DEBUG: Error saving assistant message to session: {e}")
@@ -256,7 +248,6 @@ IMPORTANT ADDITION FOR ANNOTATION ERRORS:
                 self.memory.save_context({"input": original_message}, {"output": response["output"]})
 
             return {"messages": [AIMessage(content=response["output"])]}
-
         workflow = StateGraph(FloorPlanState)
         workflow.add_node("agent", call_agent)
         workflow.add_node("action", ToolNode(ALL_TOOLS))
