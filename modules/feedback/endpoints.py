@@ -15,6 +15,7 @@ security = HTTPBearer()
 def verify_user_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Dependency to verify user JWT token"""
     token = credentials.credentials
+    print("token = ", token)
     user_id = auth_service.verify_token(token)
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid or expired token")

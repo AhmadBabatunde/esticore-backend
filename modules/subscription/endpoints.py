@@ -6,7 +6,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 import stripe
 
-from modules.subscription.service import SubscriptionService
+from modules.subscription.service import Subscription_Service  
 from modules.auth.service import auth_service
 from modules.config.settings import settings
 
@@ -24,12 +24,13 @@ def verify_user_token(credentials: HTTPAuthorizationCredentials = Depends(securi
 @router.get("/plans")
 async def get_subscription_plans():
     """Get all available subscription plans"""
-    return SubscriptionService.get_available_plans()
+    print("route hit")
+    return Subscription_Service.get_available_plans()
 
 @router.get("/user")
 async def get_user_subscription(user_id: int = Depends(verify_user_token)):
     """Get user's current subscription"""
-    return SubscriptionService.get_user_subscription(user_id)
+    return Subscription_Service.get_user_subscription(user_id)
 
 @router.post("/create-checkout-session")
 async def create_checkout_session(
@@ -38,7 +39,7 @@ async def create_checkout_session(
     user_id: int = Depends(verify_user_token)
 ):
     """Create Stripe checkout session"""
-    return SubscriptionService.create_checkout_session(user_id, plan_id, interval)
+    return Subscription_Service.create_checkout_session(user_id, plan_id, interval)
 
 @router.post("/webhook")
 async def stripe_webhook(request: Request):
@@ -47,21 +48,21 @@ async def stripe_webhook(request: Request):
     sig_header = request.headers.get('stripe-signature')
     
     try:
-        return SubscriptionService.handle_stripe_webhook(payload, sig_header)
+        return Subscription_Service.handle_stripe_webhook(payload, sig_header)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/cancel")
 async def cancel_subscription(user_id: int = Depends(verify_user_token)):
     """Cancel user subscription"""
-    return SubscriptionService.cancel_subscription(user_id)
+    return Subscription_Service.cancel_subscription(user_id)
 
 @router.post("/reactivate")
 async def reactivate_subscription(user_id: int = Depends(verify_user_token)):
     """Reactivate user subscription"""
-    return SubscriptionService.reactivate_subscription(user_id)
+    return Subscription_Service.reactivate_subscription(user_id)
 
 @router.get("/invoices")
 async def get_invoices(user_id: int = Depends(verify_user_token), limit: int = 10):
     """Get user's payment invoices"""
-    return SubscriptionService.get_user_invoices(user_id, limit)
+    return Subscription_Service.get_user_invoices(user_id, limit)
