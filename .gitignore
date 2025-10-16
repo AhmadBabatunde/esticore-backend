@@ -8,4 +8,6 @@ __pycache__/
 __pycache__
 __pycache__/
 *.py[cod]
+/venv
 .kiro
+/esticore-backend

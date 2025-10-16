@@ -57,7 +57,22 @@ class Settings:
     DB_NAME = os.getenv('DB_NAME')
     DB_USER = os.getenv('DB_USER')
     DB_PASSWORD = os.getenv('DB_PASSWORD')
-    
+
+    # Stripe Configuration
+    STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY')
+    STRIPE_WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET')
+    STRIPE_PUBLISHABLE_KEY = os.getenv('STRIPE_PUBLISHABLE_KEY')
+
+    # AWS Configuration
+    AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
+    AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
+    AWS_REGION = os.getenv('AWS_REGION')
+    S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
+
+    # JWT and Base URL
+    JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY')
+    BASE_URL = os.getenv('BASE_URL')
+
     # Database type selection and validation
     USE_RDS = bool(DB_HOST and DB_NAME and DB_USER and DB_PASSWORD)
     IS_POSTGRES = DB_PORT == 5432
@@ -79,25 +94,19 @@ class Settings:
     USE_LOCAL_STORAGE = not USE_DATABASE_STORAGE
     
     # Directory Configuration
-    # Use environment variable for DATA_DIR if available, otherwise use relative path
     DATA_DIR = os.getenv('DATA_DIR', os.path.abspath("data"))
     
-    # Configure directories based on storage type
     if USE_DATABASE_STORAGE:
-        # PostgreSQL database storage - minimal local directories
-        VECTORS_DIR = None  # Not used with pgvector
-        OUTPUT_DIR = None   # Not used with database storage
-        DOCS_DIR = None     # Not used with database storage
-        IMAGES_DIR = os.path.join(DATA_DIR, "images")  # Still needed for temporary image processing
-        
+        VECTORS_DIR = None
+        OUTPUT_DIR = None
+        DOCS_DIR = None
+        IMAGES_DIR = os.path.join(DATA_DIR, "images")
         print("INFO: Using PostgreSQL database storage - local file directories disabled")
     else:
-        # Local file storage (SQLite or MySQL without pgvector)
         VECTORS_DIR = os.path.join(DATA_DIR, "vectors")
         OUTPUT_DIR = os.path.join(DATA_DIR, "outputs")
         DOCS_DIR = os.path.join(DATA_DIR, "docs")
         IMAGES_DIR = os.path.join(DATA_DIR, "images")
-        
         print("INFO: Using local file storage - all directories enabled")
     
     # Security Configuration
@@ -111,9 +120,9 @@ class Settings:
     
     # Enhanced Session Management Configuration
     SESSION_CACHE_MAX_SIZE = int(os.getenv('SESSION_CACHE_MAX_SIZE', 1000))
-    SESSION_MAINTENANCE_INTERVAL = int(os.getenv('SESSION_MAINTENANCE_INTERVAL', 3600))  # 1 hour
-    SESSION_ACTIVITY_UPDATE_PROBABILITY = float(os.getenv('SESSION_ACTIVITY_UPDATE_PROBABILITY', 0.01))  # 1%
-    SESSION_CLEANUP_PROBABILITY = float(os.getenv('SESSION_CLEANUP_PROBABILITY', 0.01))  # 1%
+    SESSION_MAINTENANCE_INTERVAL = int(os.getenv('SESSION_MAINTENANCE_INTERVAL', 3600))
+    SESSION_ACTIVITY_UPDATE_PROBABILITY = float(os.getenv('SESSION_ACTIVITY_UPDATE_PROBABILITY', 0.01))
+    SESSION_CLEANUP_PROBABILITY = float(os.getenv('SESSION_CLEANUP_PROBABILITY', 0.01))
     
     # Context Validation Settings
     ENABLE_STRICT_CONTEXT_VALIDATION = os.getenv('ENABLE_STRICT_CONTEXT_VALIDATION', 'true').lower() == 'true'
@@ -124,23 +133,23 @@ class Settings:
     SESSION_EXPIRY_GRACE_PERIOD_HOURS = int(os.getenv('SESSION_EXPIRY_GRACE_PERIOD_HOURS', 1))
     
     # File Configuration
-    FILE_DELETE_DELAY = 3600  # 1 hour
-    CHAT_FILE_DELETE_DELAY = 7200  # 2 hours
+    FILE_DELETE_DELAY = 3600
+    CHAT_FILE_DELETE_DELAY = 7200
     
     # Database Migration Configuration
-    MIGRATION_BATCH_SIZE = int(os.getenv('MIGRATION_BATCH_SIZE', 100))  # Files per batch
-    MIGRATION_PROGRESS_INTERVAL = int(os.getenv('MIGRATION_PROGRESS_INTERVAL', 10))  # Log every N files
+    MIGRATION_BATCH_SIZE = int(os.getenv('MIGRATION_BATCH_SIZE', 100))
+    MIGRATION_PROGRESS_INTERVAL = int(os.getenv('MIGRATION_PROGRESS_INTERVAL', 10))
     ENABLE_MIGRATION_ROLLBACK = os.getenv('ENABLE_MIGRATION_ROLLBACK', 'true').lower() == 'true'
     
     # Database Maintenance Configuration
     AUTO_VACUUM_ENABLED = os.getenv('AUTO_VACUUM_ENABLED', 'true').lower() == 'true'
-    VACUUM_SCHEDULE_HOURS = int(os.getenv('VACUUM_SCHEDULE_HOURS', 24))  # Run vacuum every 24 hours
+    VACUUM_SCHEDULE_HOURS = int(os.getenv('VACUUM_SCHEDULE_HOURS', 24))
     CLEANUP_ORPHANED_RECORDS = os.getenv('CLEANUP_ORPHANED_RECORDS', 'true').lower() == 'true'
-    MAX_FILE_SIZE_MB = int(os.getenv('MAX_FILE_SIZE_MB', 100))  # Maximum file size for database storage
+    MAX_FILE_SIZE_MB = int(os.getenv('MAX_FILE_SIZE_MB', 100))
     
     # Performance Configuration
     ENABLE_QUERY_LOGGING = os.getenv('ENABLE_QUERY_LOGGING', 'false').lower() == 'true'
-    SLOW_QUERY_THRESHOLD_MS = int(os.getenv('SLOW_QUERY_THRESHOLD_MS', 1000))  # Log queries slower than 1s
+    SLOW_QUERY_THRESHOLD_MS = int(os.getenv('SLOW_QUERY_THRESHOLD_MS', 1000))
     ENABLE_CONNECTION_POOLING = os.getenv('ENABLE_CONNECTION_POOLING', 'true').lower() == 'true'
     
     @classmethod
@@ -149,17 +158,15 @@ class Settings:
         if not cls.OPENAI_API_KEY:
             raise ValueError("OPENAI_API_KEY not found in environment variables")
         
-        # Validate database configuration
         if cls.USE_RDS:
             if not all([cls.DB_HOST, cls.DB_NAME, cls.DB_USER, cls.DB_PASSWORD]):
                 raise ValueError("Database configuration incomplete. Please set DB_HOST, DB_NAME, DB_USER, and DB_PASSWORD")
             
-            # Validate database type
             if cls.IS_POSTGRES:
                 print(f"✓ Using PostgreSQL database: {cls.DB_HOST}:{cls.DB_PORT}/{cls.DB_NAME}")
                 if cls.PGVECTOR_ENABLED:
                     print(f"✓ pgvector enabled with {cls.VECTOR_DIMENSIONS} dimensions")
-                    print(f"✓ Database storage enabled - files and vectors stored in PostgreSQL")
+                    print("✓ Database storage enabled - files and vectors stored in PostgreSQL")
                 else:
                     print("⚠ pgvector disabled - using local file storage")
             elif cls.IS_MYSQL:
@@ -168,37 +175,28 @@ class Settings:
             else:
                 print(f"⚠ Unknown database type on port {cls.DB_PORT} - assuming local file storage")
             
-            # Validate connection pool settings
             if cls.DB_POOL_SIZE < 1:
                 raise ValueError("DB_POOL_SIZE must be at least 1")
             if cls.DB_POOL_TIMEOUT < 1:
                 raise ValueError("DB_POOL_TIMEOUT must be at least 1 second")
-                
         else:
             print("ℹ Using SQLite database with local file storage")
         
-        # Validate vector configuration
         if cls.USE_DATABASE_STORAGE:
             if cls.VECTOR_DIMENSIONS not in [1536, 1024, 768, 512]:
-                print(f"⚠ Unusual vector dimensions: {cls.VECTOR_DIMENSIONS} (common: 1536 for OpenAI)")
+                print(f"⚠ Unusual vector dimensions: {cls.VECTOR_DIMENSIONS}")
             if cls.VECTOR_INDEX_LISTS < 1:
                 raise ValueError("VECTOR_INDEX_LISTS must be at least 1")
         
-        # Log important environment information for debugging
         print("DEBUG: Environment information:")
         print(f"  Current working directory: {os.getcwd()}")
         print(f"  DATA_DIR environment variable: {os.getenv('DATA_DIR', 'Not set')}")
         print(f"  Script location: {os.path.abspath(__file__)}")
         
-        # Create directories if they don't exist and log their paths
         directories = {'DATA_DIR': cls.DATA_DIR}
-        
-        # Add directories based on storage configuration
         if cls.USE_DATABASE_STORAGE:
-            # Only need images directory for temporary processing
             directories['IMAGES_DIR'] = cls.IMAGES_DIR
         else:
-            # Need all directories for local file storage
             directories.update({
                 'VECTORS_DIR': cls.VECTORS_DIR,
                 'OUTPUT_DIR': cls.OUTPUT_DIR,
@@ -208,7 +206,7 @@ class Settings:
         
         print("DEBUG: Directory configuration:")
         for name, directory in directories.items():
-            if directory:  # Only create directories that are defined
+            if directory:
                 os.makedirs(directory, exist_ok=True)
                 print(f"  ✓ {name}: {directory}")
                 print(f"    exists: {os.path.exists(directory)}")
@@ -216,7 +214,6 @@ class Settings:
             else:
                 print(f"  - {name}: Disabled (using database storage)")
         
-        # Log storage configuration summary
         print("\nStorage Configuration Summary:")
         print(f"  Database Storage: {'✓ Enabled' if cls.USE_DATABASE_STORAGE else '✗ Disabled'}")
         print(f"  Local File Storage: {'✓ Enabled' if cls.USE_LOCAL_STORAGE else '✗ Disabled'}")
