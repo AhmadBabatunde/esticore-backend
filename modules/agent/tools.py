@@ -813,65 +813,6 @@ Provide a helpful and accurate answer:"""
         return f"I encountered an error while processing your question. Please try rephrasing your question or check if the document is properly loaded."
 
 @tool
-def quick_page_analysis(doc_id: str, page_number: int = 1) -> str:
-    """Fast text-only analysis of a specific page without image processing."""
-    try:
-        doc_info = pdf_processor.get_document_info(doc_id)
-        reader = PdfReader(doc_info["pdf_path"])
-        
-        if page_number > len(reader.pages):
-            return f"Error: Page {page_number} does not exist. Document has {len(reader.pages)} pages."
-        
-        # Extract text from the specific page
-        page = reader.pages[page_number - 1]
-        raw_text = page.extract_text()
-        
-        if not raw_text or len(raw_text.strip()) < 10:
-            return f"Page {page_number} contains primarily visual content with minimal extractable text. Consider using visual analysis for detailed information."
-        
-        # Quick text-based analysis using LLM
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
-        analysis_prompt = f"""Analyze the text content from this document page and provide a concise summary.
-
-Page {page_number} content:
-{raw_text}
-
-Provide a brief but informative summary of the key information on this page:"""
-        
-        response = llm.invoke(analysis_prompt)
-        return response.content
-        
-    except Exception as e:
-        return f"Error analyzing page: {str(e)}"
-
-@tool
-def answer_question_using_rag(doc_id: str, question: str) -> str:
-    """Answer questions using hybrid approach with citations, combining document and web content."""
-    try:
-        print(f"DEBUG: Processing question with hybrid approach and citations: {question}")
-        
-        # Use the new hybrid search function
-        result = process_question_with_hybrid_search(doc_id, question, include_suggestions=False)
-        
-        # Format the response as JSON with citations
-        response_data = {
-            "answer": result["answer"],
-            "citations": result["citations"],
-            "most_referenced_page": result["most_referenced_page"]
-        }
-        
-        return json.dumps(response_data)
-        
-    except Exception as e:
-        print(f"DEBUG: Error in hybrid RAG with citations: {e}")
-        # Provide a helpful fallback response even on error
-        fallback_response = {
-            "answer": f"I understand you're asking about: {question}. This is an important topic that requires comprehensive analysis. Based on best practices and general knowledge, I can provide relevant insights. However, I recommend consulting current documentation, expert resources, and up-to-date information sources for the most complete and accurate understanding.",
-            "citations": [],
-            "most_referenced_page": None
-        }
-        return json.dumps(fallback_response)
-@tool
 def analyze_pdf_page_multimodal(doc_id: str, page_number: int = 1) -> str:
     """Optimized multimodal analysis of a PDF page using both text and visual analysis."""
     try:
@@ -1470,6 +1411,17 @@ def _get_design_notes(object_type, aspect_ratio):
     
     return "Proportion appears reasonable for the object type"
 
+@tool
+def clean_temp_image(image_path: str):
+    """Clean up temporary image files by removing them from the filesystem."""
+    if os.path.exists(image_path):
+            try:
+                os.remove(image_path)
+                print(f"DEBUG: Cleaned up temporary image file: {image_path}")
+            except Exception as e:
+                print(f"DEBUG: Error cleaning up temporary image file {image_path}: {e}")
+
+
 # List of all available tools
 ALL_TOOLS = [
     load_pdf_for_floorplan,
@@ -1480,9 +1432,9 @@ ALL_TOOLS = [
     generate_frontend_annotations,
     answer_question_using_rag,
     answer_question_with_suggestions,
-    quick_page_analysis,
     analyze_pdf_page_multimodal,
     measure_objects,
     calibrate_scale,
-    analyze_object_proportions
+    analyze_object_proportions,
+    clean_temp_image
 ]

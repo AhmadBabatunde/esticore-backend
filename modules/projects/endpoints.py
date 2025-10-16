@@ -6,7 +6,7 @@ from typing import Optional, List
 from modules.projects.service import project_service
 from modules.agent.workflow import agent_workflow
 from modules.database import db_manager
-from modules.session import session_manager
+from modules.session import session_manager, context_resolver
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -25,9 +25,6 @@ async def create_project(
         print(f"Debug: received files: {files}")
         print(f"Debug: files is None: {files is None}")
         print(f"Debug: files length: {len(files) if files else 0}")
-        
-        # Create a new session for this project (will be upgraded to context-aware session when first used)
-        session_id = agent_workflow.get_or_create_chat_session()
         
         if files and len(files) > 0 and files[0].filename != '':
             # Validate file types and process files
@@ -57,7 +54,13 @@ async def create_project(
                 user_id=user_id
             )
         
-        # Add session_id to the response
+        # --- THIS IS THE FIX ---
+        # Replace the old session creation line with this:
+        context_type, context_id = context_resolver.resolve_context({'project_id': result["project_id"]})
+        session_id = session_manager.get_or_create_session(user_id, context_type, context_id)
+        # ------------------------
+        
+        # Add the new, context-aware session_id to the response
         result["session_id"] = session_id
         
         return result
@@ -82,9 +85,6 @@ async def create_project_single_file(
         print(f"Debug: file is None: {file is None}")
         if file:
             print(f"Debug: filename: {file.filename}")
-        
-        # Create a new session for this project (will be upgraded to context-aware session when first used)
-        session_id = agent_workflow.get_or_create_chat_session()
         
         if file and file.filename and file.filename != '':
             # Validate file type
@@ -111,6 +111,10 @@ async def create_project_single_file(
                 description=description,
                 user_id=user_id
             )
+        
+        # Create a context-aware session for this project
+        context_type, context_id = context_resolver.resolve_context({'project_id': result["project_id"]})
+        session_id = session_manager.get_or_create_session(user_id, context_type, context_id)
         
         # Add session_id to the response
         result["session_id"] = session_id
