@@ -45,6 +45,6 @@ requests
 stripe
 boto3
 python-jose[cryptography]
-python-multiparty
+python-multipart
 langchain_tavily
-pyjwt
+PyJWT
