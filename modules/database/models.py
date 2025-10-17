@@ -145,6 +145,17 @@ class EmailVerificationToken:
     used_at: Optional[datetime] = None
 
 @dataclass
+class UserOTP:
+    """Generic user OTP data model"""
+    id: Optional[int] = None
+    user_id: int = 0
+    otp_code: str = ""
+    purpose: str = ""
+    expires_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    consumed_at: Optional[datetime] = None
+
+@dataclass
 class Document:
     """Document data model"""
     id: Optional[int] = None
@@ -157,6 +168,40 @@ class Document:
     user_id: int = 0  # Owner of the document
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+@dataclass
+class ProjectMember:
+    """Project membership data model"""
+    id: Optional[int] = None
+    project_id: str = ""
+    user_id: int = 0
+    role: str = "member"
+    created_at: Optional[datetime] = None
+
+@dataclass
+class ProjectInvitation:
+    """Project invitation data model"""
+    id: Optional[int] = None
+    project_id: str = ""
+    inviter_id: int = 0
+    invitee_id: Optional[int] = None
+    invitee_email: str = ""
+    role: str = "member"
+    status: str = "pending"
+    created_at: Optional[datetime] = None
+    responded_at: Optional[datetime] = None
+
+@dataclass
+class Notification:
+    """User notification data model"""
+    id: Optional[int] = None
+    user_id: int = 0
+    title: str = ""
+    message: str = ""
+    notification_type: str = "general"
+    metadata: Optional[Dict[str, Any]] = None
+    is_read: bool = False
+    created_at: Optional[datetime] = None
     
     def validate(self) -> bool:
         """Validate document data"""
@@ -559,7 +604,77 @@ class DatabaseManager:
             # Create indexes for project_documents
             cur.execute("CREATE INDEX IF NOT EXISTS idx_project_documents_project_id ON project_documents (project_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_project_documents_doc_id ON project_documents (doc_id)")
-            
+
+            # Create project_members table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS project_members(
+                    id SERIAL PRIMARY KEY,
+                    project_id VARCHAR(255) NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    role VARCHAR(50) DEFAULT 'member',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (project_id) REFERENCES projects (project_id) ON DELETE CASCADE,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    UNIQUE (project_id, user_id)
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members (user_id)")
+
+            # Create project_invitations table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS project_invitations(
+                    id SERIAL PRIMARY KEY,
+                    project_id VARCHAR(255) NOT NULL,
+                    inviter_id INTEGER NOT NULL,
+                    invitee_id INTEGER,
+                    invitee_email VARCHAR(255) NOT NULL,
+                    role VARCHAR(50) DEFAULT 'member',
+                    status VARCHAR(20) DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    responded_at TIMESTAMP,
+                    FOREIGN KEY (project_id) REFERENCES projects (project_id) ON DELETE CASCADE,
+                    FOREIGN KEY (inviter_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    FOREIGN KEY (invitee_id) REFERENCES userdata (id) ON DELETE SET NULL
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_project_invitations_invitee ON project_invitations (invitee_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_project_invitations_email ON project_invitations (invitee_email)")
+
+            # Create notifications table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS notifications(
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    title VARCHAR(255) NOT NULL,
+                    message TEXT NOT NULL,
+                    notification_type VARCHAR(50) DEFAULT 'general',
+                    metadata JSONB,
+                    is_read BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications (user_id, is_read)")
+
+            # Create user OTP table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_otp_codes(
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    otp_code VARCHAR(10) NOT NULL,
+                    purpose VARCHAR(50) NOT NULL,
+                    expires_at TIMESTAMP NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    consumed_at TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_user_otp_lookup ON user_otp_codes (user_id, purpose, consumed_at)")
+
             # Create chat_sessions table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS chat_sessions(
@@ -807,7 +922,73 @@ class DatabaseManager:
                     INDEX idx_doc_id (doc_id)
                 ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """)
-            
+
+            # Create project_members table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS project_members(
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    project_id VARCHAR(255) NOT NULL,
+                    user_id INT NOT NULL,
+                    role VARCHAR(50) DEFAULT 'member',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (project_id) REFERENCES projects (project_id) ON DELETE CASCADE,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    UNIQUE KEY unique_member (project_id, user_id),
+                    INDEX idx_project_members_user (user_id)
+                ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """)
+
+            # Create project_invitations table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS project_invitations(
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    project_id VARCHAR(255) NOT NULL,
+                    inviter_id INT NOT NULL,
+                    invitee_id INT NULL,
+                    invitee_email VARCHAR(255) NOT NULL,
+                    role VARCHAR(50) DEFAULT 'member',
+                    status VARCHAR(20) DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    responded_at TIMESTAMP NULL,
+                    FOREIGN KEY (project_id) REFERENCES projects (project_id) ON DELETE CASCADE,
+                    FOREIGN KEY (inviter_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    FOREIGN KEY (invitee_id) REFERENCES userdata (id) ON DELETE SET NULL,
+                    INDEX idx_project_invitations_invitee (invitee_id),
+                    INDEX idx_project_invitations_email (invitee_email)
+                ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """)
+
+            # Create notifications table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS notifications(
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NOT NULL,
+                    title VARCHAR(255) NOT NULL,
+                    message TEXT NOT NULL,
+                    notification_type VARCHAR(50) DEFAULT 'general',
+                    metadata JSON,
+                    is_read BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    INDEX idx_notifications_user (user_id, is_read)
+                ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """)
+
+            # Create user OTP table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_otp_codes(
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NOT NULL,
+                    otp_code VARCHAR(10) NOT NULL,
+                    purpose VARCHAR(50) NOT NULL,
+                    expires_at TIMESTAMP NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    consumed_at TIMESTAMP NULL,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    INDEX idx_user_otp_lookup (user_id, purpose, consumed_at)
+                ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """)
+
             # Create chat_sessions table for enhanced session management
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS chat_sessions(
@@ -1126,7 +1307,77 @@ class DatabaseManager:
             # Create indexes
             cur.execute("CREATE INDEX IF NOT EXISTS idx_project_documents_project_id ON project_documents (project_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_project_documents_doc_id ON project_documents (doc_id)")
-            
+
+            # Create project_members table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS project_members(
+                    id INTEGER PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    role TEXT DEFAULT 'member',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (project_id) REFERENCES projects (project_id) ON DELETE CASCADE,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    UNIQUE (project_id, user_id)
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members (user_id)")
+
+            # Create project_invitations table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS project_invitations(
+                    id INTEGER PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    inviter_id INTEGER NOT NULL,
+                    invitee_id INTEGER,
+                    invitee_email TEXT NOT NULL,
+                    role TEXT DEFAULT 'member',
+                    status TEXT DEFAULT 'pending',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    responded_at DATETIME,
+                    FOREIGN KEY (project_id) REFERENCES projects (project_id) ON DELETE CASCADE,
+                    FOREIGN KEY (inviter_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    FOREIGN KEY (invitee_id) REFERENCES userdata (id) ON DELETE SET NULL
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_project_invitations_invitee ON project_invitations (invitee_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_project_invitations_email ON project_invitations (invitee_email)")
+
+            # Create notifications table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS notifications(
+                    id INTEGER PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    notification_type TEXT DEFAULT 'general',
+                    metadata TEXT,
+                    is_read BOOLEAN DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications (user_id, is_read)")
+
+            # Create user OTP table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_otp_codes(
+                    id INTEGER PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    otp_code TEXT NOT NULL,
+                    purpose TEXT NOT NULL,
+                    expires_at DATETIME NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    consumed_at DATETIME,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_user_otp_lookup ON user_otp_codes (user_id, purpose, consumed_at)")
+
             # Create chat_sessions table for enhanced session management
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS chat_sessions(
@@ -2173,13 +2424,31 @@ class DatabaseManager:
         conn = self.get_connection()
         cur = conn.cursor()
         placeholder = self._get_placeholder()
-        
+
         try:
             cur.execute(f"UPDATE userdata SET google_id = {placeholder} WHERE id = {placeholder}", (google_id, user_id))
             conn.commit()
         finally:
             conn.close()
-    
+
+    def update_user_password(self, user_id: int, new_password: str) -> bool:
+        """Update user password"""
+        hashed_password = hashlib.sha256(new_password.encode()).hexdigest()
+
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"UPDATE userdata SET password = {placeholder} WHERE id = {placeholder}",
+                (hashed_password, user_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
     def update_user_profile(self, user_id: int, **kwargs) -> bool:
         """Update user profile"""
         conn = self.get_connection()
@@ -3215,19 +3484,39 @@ class DatabaseManager:
         finally:
             conn.close()
     # Email verification methods
-    def create_verification_token(self, user_id: int, token: str, expires_at: datetime) -> bool:
-        """Create or update verification token for user"""
+    def create_verification_token(
+        self,
+        user_id: int,
+        token: str,
+        expires_at: datetime,
+        purpose: str = "email_verification"
+    ) -> bool:
+        """Create or update verification/OTP token for user"""
         conn = self.get_connection()
         cur = conn.cursor()
         placeholder = self._get_placeholder()
-        
+
         try:
+            # Update legacy verification columns only for email verification purpose
+            if purpose == "email_verification":
+                cur.execute(
+                    f"UPDATE userdata SET verification_token = {placeholder}, verification_token_expires = {placeholder} WHERE id = {placeholder}",
+                    (token, expires_at, user_id)
+                )
+
+            # Ensure only one active OTP per user/purpose
             cur.execute(
-                f"UPDATE userdata SET verification_token = {placeholder}, verification_token_expires = {placeholder} WHERE id = {placeholder}",
-                (token, expires_at, user_id)
+                f"DELETE FROM user_otp_codes WHERE user_id = {placeholder} AND purpose = {placeholder}",
+                (user_id, purpose)
             )
+
+            cur.execute(
+                f"INSERT INTO user_otp_codes (user_id, otp_code, purpose, expires_at) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                (user_id, token, purpose, expires_at)
+            )
+
             conn.commit()
-            return cur.rowcount > 0
+            return True
         finally:
             conn.close()
     
@@ -3253,7 +3542,50 @@ class DatabaseManager:
             return None
         finally:
             conn.close()
-    
+
+    def get_user_otp(self, user_id: int, purpose: str) -> Optional[UserOTP]:
+        """Retrieve the most recent active OTP for a user and purpose"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"SELECT id, user_id, otp_code, purpose, expires_at, created_at, consumed_at FROM user_otp_codes WHERE user_id = {placeholder} AND purpose = {placeholder} ORDER BY created_at DESC LIMIT 1",
+                (user_id, purpose)
+            )
+            row = cur.fetchone()
+
+            if row:
+                return UserOTP(
+                    id=row[0],
+                    user_id=row[1],
+                    otp_code=row[2],
+                    purpose=row[3],
+                    expires_at=row[4],
+                    created_at=row[5],
+                    consumed_at=row[6]
+                )
+            return None
+        finally:
+            conn.close()
+
+    def consume_user_otp(self, user_id: int, otp_code: str, purpose: str) -> bool:
+        """Mark an OTP as consumed"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"UPDATE user_otp_codes SET consumed_at = CURRENT_TIMESTAMP WHERE user_id = {placeholder} AND otp_code = {placeholder} AND purpose = {placeholder} AND consumed_at IS NULL",
+                (user_id, otp_code, purpose)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
     def verify_user_email(self, user_id: int) -> bool:
         """Mark user email as verified and clear verification token"""
         conn = self.get_connection()
@@ -3269,7 +3601,7 @@ class DatabaseManager:
             return cur.rowcount > 0
         finally:
             conn.close()
-    
+
     def clear_expired_verification_tokens(self):
         """Clear expired verification tokens"""
         conn = self.get_connection()
@@ -3286,6 +3618,20 @@ class DatabaseManager:
                 )
             conn.commit()
             return cur.rowcount
+        finally:
+            conn.close()
+
+    def clear_expired_otps(self):
+        """Remove expired OTP codes"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+
+        try:
+            if self.use_rds:
+                cur.execute("DELETE FROM user_otp_codes WHERE expires_at < NOW() OR consumed_at IS NOT NULL")
+            else:
+                cur.execute("DELETE FROM user_otp_codes WHERE expires_at < datetime('now') OR consumed_at IS NOT NULL")
+            conn.commit()
         finally:
             conn.close()
 
@@ -3731,7 +4077,345 @@ class DatabaseManager:
             return result
         finally:
             conn.close()
-    
+
+    def get_shared_projects_for_user(self, user_id: int) -> List[Dict[str, Any]]:
+        """Get projects shared with the user along with membership role"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"SELECT p.id, p.project_id, p.name, p.description, p.user_id, p.doc_ids, p.created_at, p.updated_at, pm.role FROM projects p INNER JOIN project_members pm ON p.project_id = pm.project_id WHERE pm.user_id = {placeholder} ORDER BY pm.created_at DESC",
+                (user_id,)
+            )
+            rows = cur.fetchall()
+
+            shared = []
+            for row in rows:
+                doc_ids = None
+                if row[5]:
+                    try:
+                        doc_ids = json.loads(row[5])
+                    except Exception:
+                        doc_ids = [row[5]]
+
+                shared.append({
+                    "project": Project(
+                        id=row[0],
+                        project_id=row[1],
+                        name=row[2],
+                        description=row[3],
+                        user_id=row[4],
+                        doc_ids=doc_ids,
+                        created_at=row[6],
+                        updated_at=row[7]
+                    ),
+                    "role": row[8]
+                })
+            return shared
+        finally:
+            conn.close()
+
+    def get_project_members(self, project_id: str) -> List[ProjectMember]:
+        """Retrieve members for a project"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"SELECT id, project_id, user_id, role, created_at FROM project_members WHERE project_id = {placeholder}",
+                (project_id,)
+            )
+            rows = cur.fetchall()
+            return [
+                ProjectMember(id=row[0], project_id=row[1], user_id=row[2], role=row[3], created_at=row[4])
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    def add_project_member(self, project_id: str, user_id: int, role: str = "member") -> bool:
+        """Add a member to a project"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"SELECT id FROM project_members WHERE project_id = {placeholder} AND user_id = {placeholder}",
+                (project_id, user_id)
+            )
+            if cur.fetchone():
+                return False
+
+            cur.execute(
+                f"INSERT INTO project_members (project_id, user_id, role) VALUES ({placeholder}, {placeholder}, {placeholder})",
+                (project_id, user_id, role)
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def remove_project_member(self, project_id: str, user_id: int) -> bool:
+        """Remove a member from a project"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"DELETE FROM project_members WHERE project_id = {placeholder} AND user_id = {placeholder}",
+                (project_id, user_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def user_has_project_access(self, project_id: str, user_id: int) -> bool:
+        """Check if user is owner or member of project"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"SELECT 1 FROM projects WHERE project_id = {placeholder} AND user_id = {placeholder}",
+                (project_id, user_id)
+            )
+            if cur.fetchone():
+                return True
+
+            cur.execute(
+                f"SELECT 1 FROM project_members WHERE project_id = {placeholder} AND user_id = {placeholder}",
+                (project_id, user_id)
+            )
+            return cur.fetchone() is not None
+        finally:
+            conn.close()
+
+    def get_pending_project_invitation(self, project_id: str, invitee_id: int) -> Optional[ProjectInvitation]:
+        """Fetch a pending invitation for a user"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"SELECT id, project_id, inviter_id, invitee_id, invitee_email, role, status, created_at, responded_at FROM project_invitations WHERE project_id = {placeholder} AND invitee_id = {placeholder} AND status = 'pending'",
+                (project_id, invitee_id)
+            )
+            row = cur.fetchone()
+
+            if row:
+                return ProjectInvitation(
+                    id=row[0],
+                    project_id=row[1],
+                    inviter_id=row[2],
+                    invitee_id=row[3],
+                    invitee_email=row[4],
+                    role=row[5],
+                    status=row[6],
+                    created_at=row[7],
+                    responded_at=row[8]
+                )
+            return None
+        finally:
+            conn.close()
+
+    def create_project_invitation(
+        self,
+        project_id: str,
+        inviter_id: int,
+        invitee_id: int,
+        invitee_email: str,
+        role: str = "member"
+    ) -> int:
+        """Create a new project invitation"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            # Remove existing pending invitation for same user
+            cur.execute(
+                f"DELETE FROM project_invitations WHERE project_id = {placeholder} AND invitee_id = {placeholder} AND status = 'pending'",
+                (project_id, invitee_id)
+            )
+
+            cur.execute(
+                f"INSERT INTO project_invitations (project_id, inviter_id, invitee_id, invitee_email, role) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                (project_id, inviter_id, invitee_id, invitee_email, role)
+            )
+            conn.commit()
+
+            cur.execute(f"SELECT id FROM project_invitations WHERE project_id = {placeholder} AND invitee_id = {placeholder} ORDER BY created_at DESC LIMIT 1", (project_id, invitee_id))
+            row = cur.fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
+    def get_project_invitation_by_id(self, invitation_id: int) -> Optional[ProjectInvitation]:
+        """Retrieve invitation by ID"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"SELECT id, project_id, inviter_id, invitee_id, invitee_email, role, status, created_at, responded_at FROM project_invitations WHERE id = {placeholder}",
+                (invitation_id,)
+            )
+            row = cur.fetchone()
+
+            if row:
+                return ProjectInvitation(
+                    id=row[0],
+                    project_id=row[1],
+                    inviter_id=row[2],
+                    invitee_id=row[3],
+                    invitee_email=row[4],
+                    role=row[5],
+                    status=row[6],
+                    created_at=row[7],
+                    responded_at=row[8]
+                )
+            return None
+        finally:
+            conn.close()
+
+    def update_project_invitation_status(self, invitation_id: int, status: str) -> bool:
+        """Update invitation status"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"UPDATE project_invitations SET status = {placeholder}, responded_at = CURRENT_TIMESTAMP WHERE id = {placeholder}",
+                (status, invitation_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def get_user_project_invitations(self, user_id: int, status: Optional[str] = None) -> List[ProjectInvitation]:
+        """List invitations for a user"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            if status:
+                cur.execute(
+                    f"SELECT id, project_id, inviter_id, invitee_id, invitee_email, role, status, created_at, responded_at FROM project_invitations WHERE invitee_id = {placeholder} AND status = {placeholder} ORDER BY created_at DESC",
+                    (user_id, status)
+                )
+            else:
+                cur.execute(
+                    f"SELECT id, project_id, inviter_id, invitee_id, invitee_email, role, status, created_at, responded_at FROM project_invitations WHERE invitee_id = {placeholder} ORDER BY created_at DESC",
+                    (user_id,)
+                )
+
+            rows = cur.fetchall()
+            return [
+                ProjectInvitation(
+                    id=row[0],
+                    project_id=row[1],
+                    inviter_id=row[2],
+                    invitee_id=row[3],
+                    invitee_email=row[4],
+                    role=row[5],
+                    status=row[6],
+                    created_at=row[7],
+                    responded_at=row[8]
+                )
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    def create_notification(self, user_id: int, title: str, message: str, notification_type: str = "general", metadata: Dict[str, Any] = None) -> bool:
+        """Create in-app notification"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        metadata_json = json.dumps(metadata) if metadata else None
+
+        try:
+            cur.execute(
+                f"INSERT INTO notifications (user_id, title, message, notification_type, metadata) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                (user_id, title, message, notification_type, metadata_json)
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def get_notifications(self, user_id: int, include_read: bool = False, limit: int = 50) -> List[Notification]:
+        """Retrieve notifications for a user"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            if include_read:
+                cur.execute(
+                    f"SELECT id, user_id, title, message, notification_type, metadata, is_read, created_at FROM notifications WHERE user_id = {placeholder} ORDER BY created_at DESC LIMIT {limit}",
+                    (user_id,)
+                )
+            else:
+                cur.execute(
+                    f"SELECT id, user_id, title, message, notification_type, metadata, is_read, created_at FROM notifications WHERE user_id = {placeholder} AND is_read = {0 if not self.use_rds else 'FALSE'} ORDER BY created_at DESC LIMIT {limit}",
+                    (user_id,)
+                )
+
+            rows = cur.fetchall()
+            notifications = []
+            for row in rows:
+                metadata_value = row[5]
+                if metadata_value and isinstance(metadata_value, str):
+                    try:
+                        metadata_value = json.loads(metadata_value)
+                    except json.JSONDecodeError:
+                        metadata_value = {"raw": metadata_value}
+
+                notifications.append(Notification(
+                    id=row[0],
+                    user_id=row[1],
+                    title=row[2],
+                    message=row[3],
+                    notification_type=row[4],
+                    metadata=metadata_value,
+                    is_read=bool(row[6]),
+                    created_at=row[7]
+                ))
+            return notifications
+        finally:
+            conn.close()
+
+    def mark_notification_read(self, notification_id: int, user_id: int) -> bool:
+        """Mark notification as read"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            value_true = 1 if not self.use_rds else 'TRUE'
+            cur.execute(
+                f"UPDATE notifications SET is_read = {value_true} WHERE id = {placeholder} AND user_id = {placeholder}",
+                (notification_id, user_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
     # Document management methods
     def create_document(self, doc_id: str, filename: str, file_id: str, pages: int, chunks_indexed: int, user_id: int, pdf_path: str = None, vector_path: str = None) -> int:
         """Create a new document record"""

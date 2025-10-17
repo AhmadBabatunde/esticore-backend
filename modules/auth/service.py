@@ -3,7 +3,7 @@ Authentication services for the Floor Plan Agent API
 """
 import secrets
 from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from email_validator import validate_email, EmailNotValidError
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
@@ -13,14 +13,49 @@ from modules.config.settings import settings
 from modules.database import db_manager, User
 import jwt
 from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
-from datetime import datetime, timedelta
 
 class AuthService:
     """Authentication service class"""
     
     def __init__(self):
         self.db = db_manager
-    
+
+    def _ensure_datetime(self, value) -> Optional[datetime]:
+        """Normalize datetime value from database"""
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                formats = [
+                    "%Y-%m-%d %H:%M:%S",
+                    "%Y-%m-%d %H:%M:%S.%f",
+                    "%Y-%m-%dT%H:%M:%S",
+                    "%Y-%m-%dT%H:%M:%S.%f"
+                ]
+                for fmt in formats:
+                    try:
+                        return datetime.strptime(value, fmt)
+                    except ValueError:
+                        continue
+        return None
+
+    def _validate_otp(self, user: User, otp: str, purpose: str):
+        """Validate OTP for a user and purpose"""
+        otp_record = self.db.get_user_otp(user.id, purpose)
+        if not otp_record or otp_record.otp_code != otp:
+            raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+
+        if otp_record.consumed_at:
+            raise HTTPException(status_code=400, detail="OTP already used")
+
+        expires_at = self._ensure_datetime(otp_record.expires_at)
+        if expires_at and expires_at < datetime.now():
+            raise HTTPException(status_code=400, detail="OTP has expired")
+
+        return otp_record
+
     def validate_email_format(self, email: str) -> bool:
         """Validate email format"""
         try:
@@ -71,7 +106,9 @@ class AuthService:
                 "lastname": lastname,
                 "email": email,
                 "verification_email_sent": email_sent,
-                "requires_verification": True
+                "requires_verification": True,
+                "otp_purpose": "email_verification",
+                "otp_delivery": "email"
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
@@ -92,23 +129,37 @@ class AuthService:
             # Automatically resend verification email
             from modules.auth.email_service import email_service
             email_sent = email_service.resend_verification_email(user.id, user.email, user.firstname)
-            
+
             return {
                 "message": "Please verify your email address before logging in. We've sent a new verification email.",
                 "user_id": user.id,
                 "email": user.email,
                 "requires_verification": True,
                 "verified": False,
-                "verification_email_sent": email_sent
+                "verification_email_sent": email_sent,
+                "otp_purpose": "email_verification",
+                "otp_delivery": "email"
             }
-        
+
+        from modules.auth.email_service import email_service
+        otp_sent = email_service.send_login_otp_email(
+            user.id,
+            user.email,
+            user.firstname,
+            provider="google" if user.google_id else "password"
+        )
+
         return {
-            "message": "Login successful",
+            "message": "OTP sent to your email. Please verify to complete login.",
             "user_id": user.id,
             "firstname": user.firstname,
             "lastname": user.lastname,
             "email": user.email,
-            "verified": user.is_verified
+            "verified": user.is_verified,
+            "requires_otp": True,
+            "otp_delivery": "email",
+            "otp_purpose": "login",
+            "otp_sent": otp_sent
         }
     
     def google_signup(self, id_token_str: str) -> Dict[str, Any]:
@@ -155,15 +206,22 @@ class AuthService:
             
             # Mark Google OAuth users as verified by default
             self.db.verify_user_email(user_id)
-            
+
+            from modules.auth.email_service import email_service
+            otp_sent = email_service.send_login_otp_email(user_id, email, firstname, provider="google")
+
             return {
-                "message": "User created successfully",
+                "message": "User created successfully. Please confirm the OTP sent to your email to continue.",
                 "user_id": user_id,
                 "firstname": firstname,
                 "lastname": lastname,
                 "email": email,
                 "verified": True,
-                "action": "signup"
+                "action": "signup",
+                "requires_otp": True,
+                "otp_delivery": "email",
+                "otp_purpose": "login",
+                "otp_sent": otp_sent
             }
             
         except ValueError as e:
@@ -208,12 +266,19 @@ class AuthService:
             if user.google_id is None:
                 self.db.update_user_google_id(user.id, google_user_id)
             
+            from modules.auth.email_service import email_service
+            otp_sent = email_service.send_login_otp_email(user.id, user.email, user.firstname, provider="google")
+
             return {
-                "message": "Login successful",
+                "message": "OTP sent to your email. Please verify to complete login.",
                 "user_id": user.id,
                 "firstname": user.firstname,
                 "lastname": user.lastname,
-                "email": user.email
+                "email": user.email,
+                "requires_otp": True,
+                "otp_delivery": "email",
+                "otp_purpose": "login",
+                "otp_sent": otp_sent
             }
             
         except ValueError as e:
@@ -241,12 +306,19 @@ class AuthService:
             if user.google_id is None:
                 self.db.update_user_google_id(user.id, google_id)
             
+            from modules.auth.email_service import email_service
+            otp_sent = email_service.send_login_otp_email(user.id, user.email, user.firstname, provider="google")
+
             return {
-                "message": "Login successful",
+                "message": "OTP sent to your email. Please verify to complete login.",
                 "user_id": user.id,
                 "firstname": user.firstname,
                 "lastname": user.lastname,
-                "email": user.email
+                "email": user.email,
+                "requires_otp": True,
+                "otp_delivery": "email",
+                "otp_purpose": "login",
+                "otp_sent": otp_sent
             }
             
         except Exception as e:
@@ -277,13 +349,22 @@ class AuthService:
             random_password = secrets.token_urlsafe(32)
             
             user_id = self.db.create_user(firstname, lastname, email, random_password, google_id)
-            
+
+            self.db.verify_user_email(user_id)
+
+            from modules.auth.email_service import email_service
+            otp_sent = email_service.send_login_otp_email(user_id, email, firstname, provider="google")
+
             return {
-                "message": "User created successfully",
+                "message": "User created successfully. Please confirm the OTP sent to your email to continue.",
                 "user_id": user_id,
                 "firstname": firstname,
                 "lastname": lastname,
-                "email": email
+                "email": email,
+                "requires_otp": True,
+                "otp_delivery": "email",
+                "otp_purpose": "login",
+                "otp_sent": otp_sent
             }
             
         except Exception as e:
@@ -315,7 +396,14 @@ class AuthService:
             
             # Mark user as verified
             self.db.verify_user_email(user.id)
-            
+
+            # Consume OTP if one exists for email verification
+            if user.verification_token:
+                try:
+                    self.db.consume_user_otp(user.id, user.verification_token, "email_verification")
+                except Exception:
+                    pass
+
             # Send welcome email
             from modules.auth.email_service import email_service
             email_service.send_verification_success_email(user.email, user.firstname)
@@ -356,59 +444,129 @@ class AuthService:
             return {
                 "message": "Verification email sent successfully" if email_sent else "Verification email could not be sent (check server configuration)",
                 "email": email,
-                "email_sent": email_sent
+                "email_sent": email_sent,
+                "otp_delivery": "email",
+                "otp_purpose": "email_verification"
             }
-            
+
         except HTTPException:
             raise
-    def verify_email_otp(self, email: str, otp: str) -> Dict[str, Any]:
-        """Verify user email using OTP code"""
+
+    def forgot_password(self, email: str) -> Dict[str, Any]:
+        """Send password reset OTP"""
+        user = self.db.get_user_by_email(email)
+
+        if not user:
+            return {
+                "message": "If an account exists for this email, a reset code has been sent.",
+                "email": email
+            }
+
+        from modules.auth.email_service import email_service
+        email_sent = email_service.send_password_reset_email(user.id, user.email, user.firstname)
+
+        return {
+            "message": "Password reset code sent to your email.",
+            "email": user.email,
+            "otp_delivery": "email",
+            "otp_purpose": "password_reset",
+            "otp_sent": email_sent
+        }
+
+    def reset_password(self, email: str, otp: str, new_password: str, confirm_password: str) -> Dict[str, Any]:
+        """Reset user password after OTP validation"""
+        user = self.db.get_user_by_email(email)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        if new_password != confirm_password:
+            raise HTTPException(status_code=400, detail="Passwords do not match")
+
+        is_valid, error_msg = self.validate_password_strength(new_password)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=error_msg)
+
+        self._validate_otp(user, otp, "password_reset")
+        self.db.consume_user_otp(user.id, otp, "password_reset")
+
+        if not self.db.update_user_password(user.id, new_password):
+            raise HTTPException(status_code=500, detail="Failed to update password")
+
+        return {
+            "message": "Password reset successfully",
+            "user_id": user.id,
+            "email": user.email
+        }
+
+    def verify_otp(self, email: str, otp: str, purpose: str = "email_verification") -> Dict[str, Any]:
+        """Verify OTP for a specific purpose"""
         try:
-            # Find user by email
             user = self.db.get_user_by_email(email)
             if not user:
                 raise HTTPException(status_code=404, detail="User not found")
-            
-            # Check if OTP matches
-            if not user.verification_token or user.verification_token != otp:
-                raise HTTPException(status_code=400, detail="Invalid verification code")
-            
-            # Check if OTP is expired
-            if user.verification_token_expires and user.verification_token_expires < datetime.now():
-                raise HTTPException(status_code=400, detail="Verification code has expired. Please request a new one.")
-            
-            # Check if already verified
-            if user.is_verified:
+
+            otp_record = self._validate_otp(user, otp, purpose)
+
+            # Mark OTP as consumed
+            self.db.consume_user_otp(user.id, otp, purpose)
+
+            if purpose == "email_verification":
+                if user.is_verified:
+                    return {
+                        "message": "Email already verified",
+                        "user_id": user.id,
+                        "firstname": user.firstname,
+                        "lastname": user.lastname,
+                        "email": user.email,
+                        "already_verified": True
+                    }
+
+                self.db.verify_user_email(user.id)
+
+                from modules.auth.email_service import email_service
+                email_service.send_verification_success_email(user.email, user.firstname)
+
                 return {
-                    "message": "Email already verified",
+                    "message": "Email verified successfully! You can now log in.",
                     "user_id": user.id,
                     "firstname": user.firstname,
                     "lastname": user.lastname,
                     "email": user.email,
-                    "already_verified": True
+                    "verified": True
                 }
-            
-            # Mark user as verified
-            self.db.verify_user_email(user.id)
-            
-            # Send welcome email
-            from modules.auth.email_service import email_service
-            email_service.send_verification_success_email(user.email, user.firstname)
-            
+
+            if purpose == "login":
+                return {
+                    "message": "Login successful",
+                    "user_id": user.id,
+                    "firstname": user.firstname,
+                    "lastname": user.lastname,
+                    "email": user.email,
+                    "verified": user.is_verified,
+                    "otp_verified": True
+                }
+
+            if purpose == "password_reset":
+                return {
+                    "message": "OTP verified",
+                    "user_id": user.id,
+                    "email": user.email,
+                    "otp_verified": True
+                }
+
             return {
-                "message": "Email verified successfully! You can now log in.",
+                "message": "OTP verified",
                 "user_id": user.id,
-                "firstname": user.firstname,
-                "lastname": user.lastname,
                 "email": user.email,
-                "verified": True
+                "otp_verified": True,
+                "purpose": purpose
             }
-            
+
         except HTTPException:
             raise
         except Exception as e:
-            print(f"DEBUG: Error in verify_email_otp: {str(e)}")
-            raise HTTPException(status_code=500, detail="Email verification error")
+            print(f"DEBUG: Error in verify_otp: {str(e)}")
+            raise HTTPException(status_code=500, detail="OTP verification error")
     
     def continue_with_google(self, id_token_str: str) -> Dict[str, Any]:
         """Google OAuth continue process - handles both signup and signin automatically"""
@@ -442,13 +600,20 @@ class AuthService:
             if existing_user:
                 # User exists with this Google ID - sign them in
                 print(f"DEBUG: User found by Google ID - signing in")
+                from modules.auth.email_service import email_service
+                otp_sent = email_service.send_login_otp_email(existing_user.id, existing_user.email, existing_user.firstname, provider="google")
+
                 return {
-                    "message": "Welcome back! Signed in successfully",
+                    "message": "OTP sent to your email. Please verify to continue.",
                     "user_id": existing_user.id,
                     "firstname": existing_user.firstname,
                     "lastname": existing_user.lastname,
                     "email": existing_user.email,
-                    "action": "signin"
+                    "action": "signin",
+                    "requires_otp": True,
+                    "otp_delivery": "email",
+                    "otp_purpose": "login",
+                    "otp_sent": otp_sent
                 }
             
             # If not found by Google ID, try to find by email
@@ -460,13 +625,20 @@ class AuthService:
                     # Link the Google ID to existing account and sign them in
                     print(f"DEBUG: User found by email, linking Google ID")
                     self.db.update_user_google_id(existing_user.id, google_user_id)
+                    from modules.auth.email_service import email_service
+                    otp_sent = email_service.send_login_otp_email(existing_user.id, existing_user.email, existing_user.firstname, provider="google")
+
                     return {
-                        "message": "Account linked successfully! Signed in with Google",
+                        "message": "Account linked successfully. Please verify the OTP to continue.",
                         "user_id": existing_user.id,
                         "firstname": existing_user.firstname,
                         "lastname": existing_user.lastname,
                         "email": existing_user.email,
-                        "action": "signin_and_link"
+                        "action": "signin_and_link",
+                        "requires_otp": True,
+                        "otp_delivery": "email",
+                        "otp_purpose": "login",
+                        "otp_sent": otp_sent
                     }
                 else:
                     # User has different Google ID - this shouldn't happen but handle it
@@ -487,14 +659,21 @@ class AuthService:
             # Mark Google OAuth users as verified by default
             self.db.verify_user_email(user_id)
             
+            from modules.auth.email_service import email_service
+            otp_sent = email_service.send_login_otp_email(user_id, email, firstname, provider="google")
+
             return {
-                "message": "Welcome! Account created successfully",
+                "message": "Welcome! Account created successfully. Confirm the OTP sent to your email to continue.",
                 "user_id": user_id,
                 "firstname": firstname,
                 "lastname": lastname,
                 "email": email,
                 "verified": True,
-                "action": "signup"
+                "action": "signup",
+                "requires_otp": True,
+                "otp_delivery": "email",
+                "otp_purpose": "login",
+                "otp_sent": otp_sent
             }
             
         except ValueError as e:

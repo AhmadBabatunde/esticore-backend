@@ -46,6 +46,18 @@ async def get_all_users(
     """Get all users with pagination and filtering"""
     return admin_service.get_all_users(page, limit, status, search)
 
+@router.post("/users", dependencies=[Depends(verify_admin_token)])
+async def create_user(
+    firstname: str = Form(...),
+    lastname: str = Form(...),
+    email: str = Form(...),
+    password: str = Form(...),
+    confirm_password: str = Form(...),
+    mark_verified: bool = Form(False)
+):
+    """Admin endpoint to create a new user"""
+    return admin_service.create_user_account(firstname, lastname, email, password, confirm_password, mark_verified)
+
 @router.delete("/users/{user_id}", dependencies=[Depends(verify_admin_token)])
 async def delete_user(user_id: int):
     """Delete a user and all their data"""
