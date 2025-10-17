@@ -4117,6 +4117,36 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def get_project_by_id(self, project_id: str) -> Optional[Project]:
+        """Get a single project by its project_id"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"SELECT id, project_id, name, description, user_id, doc_ids, created_at, updated_at FROM projects WHERE project_id = {placeholder}",
+                (project_id,)
+            )
+            row = cur.fetchone()
+            
+            if not row:
+                return None
+            
+            doc_ids = None
+            if row[5]:
+                try:
+                    doc_ids = json.loads(row[5])
+                except:
+                    doc_ids = [row[5]]
+            
+            return Project(
+                id=row[0], project_id=row[1], name=row[2], description=row[3],
+                user_id=row[4], doc_ids=doc_ids, created_at=row[6], updated_at=row[7]
+            )
+        finally:
+            conn.close()
+
     def get_project_members(self, project_id: str) -> List[ProjectMember]:
         """Retrieve members for a project"""
         conn = self.get_connection()
@@ -4702,6 +4732,161 @@ class DatabaseManager:
                     for row in rows
                 ]
             
+        finally:
+            conn.close()
+
+    def update_project_document(self, project_id: str, doc_ids: List[str]) -> bool:
+        """Update the document IDs for a project"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            # Convert doc_ids list to JSON string
+            doc_ids_str = json.dumps(doc_ids)
+            cur.execute(
+                f"UPDATE projects SET doc_ids = {placeholder} WHERE project_id = {placeholder}",
+                (doc_ids_str, project_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def update_project_details(self, project_id: str, name: str = None, description: str = None):
+        """Update project details"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            if self.use_rds:
+                # MySQL syntax for updating timestamp
+                if name and description:
+                    cur.execute(
+                        f"UPDATE projects SET name = {placeholder}, description = {placeholder}, updated_at = CURRENT_TIMESTAMP WHERE project_id = {placeholder}",
+                        (name, description, project_id)
+                    )
+                elif name:
+                    cur.execute(
+                        f"UPDATE projects SET name = {placeholder}, updated_at = CURRENT_TIMESTAMP WHERE project_id = {placeholder}",
+                        (name, project_id)
+                    )
+                elif description:
+                    cur.execute(
+                        f"UPDATE projects SET description = {placeholder}, updated_at = CURRENT_TIMESTAMP WHERE project_id = {placeholder}",
+                        (description, project_id)
+                    )
+            else:
+                # SQLite syntax
+                if name and description:
+                    cur.execute(
+                        "UPDATE projects SET name = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE project_id = ?",
+                        (name, description, project_id)
+                    )
+                elif name:
+                    cur.execute(
+                        "UPDATE projects SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE project_id = ?",
+                        (name, project_id)
+                    )
+                elif description:
+                    cur.execute(
+                        "UPDATE projects SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE project_id = ?",
+                        (description, project_id)
+                    )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def delete_project(self, project_id: str) -> bool:
+        """Delete a project record (cascades to project_documents)"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(f"DELETE FROM projects WHERE project_id = {placeholder}", (project_id,))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    # Project-Document relationship methods
+    def add_document_to_project(self, project_id: str, doc_id: str) -> bool:
+        """Add a document to a project"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"INSERT INTO project_documents (project_id, doc_id) VALUES ({placeholder}, {placeholder})",
+                (project_id, doc_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception as e:
+            # Handle duplicate key error gracefully
+            if "Duplicate" in str(e) or "UNIQUE constraint" in str(e):
+                return False  # Already exists
+            raise e
+        finally:
+            conn.close()
+
+    def remove_document_from_project(self, project_id: str, doc_id: str) -> bool:
+        """Remove a document from a project"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"DELETE FROM project_documents WHERE project_id = {placeholder} AND doc_id = {placeholder}",
+                (project_id, doc_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def get_document_projects(self, doc_id: str) -> List[Project]:
+        """Get all projects that contain a specific document"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(f"""
+                SELECT p.id, p.project_id, p.name, p.description, p.user_id, p.doc_ids, p.created_at, p.updated_at 
+                FROM projects p
+                INNER JOIN project_documents pd ON p.project_id = pd.project_id
+                WHERE pd.doc_id = {placeholder}
+                ORDER BY p.created_at DESC
+            """, (doc_id,))
+            rows = cur.fetchall()
+            
+            result = []
+            for row in rows:
+                # Parse doc_ids from JSON string if present
+                doc_ids = None
+                if row[5]:
+                    try:
+                        doc_ids = json.loads(row[5])
+                    except json.JSONDecodeError:
+                        doc_ids = [row[5]]  # Fallback to old single doc_id format
+                
+                result.append(Project(
+                    id=row[0],
+                    project_id=row[1],
+                    name=row[2],
+                    description=row[3],
+                    user_id=row[4],
+                    doc_ids=doc_ids,
+                    created_at=row[6],
+                    updated_at=row[7]
+                ))
+            
+            return result
         finally:
             conn.close()
 

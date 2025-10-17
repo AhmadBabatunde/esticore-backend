@@ -303,7 +303,7 @@ def process_question_with_hybrid_search(doc_id: str, question: str, include_sugg
                         doc_citations.append({
                             "id": i + 1,
                             "page": doc.get("page", 1),
-                            "text": doc.get("text", ""),
+                            "text": doc.get("text", "")[:500] if doc.get("text") else "",
                             "relevance_score": 0.8,
                             "doc_id": doc_id
                         })
@@ -311,7 +311,7 @@ def process_question_with_hybrid_search(doc_id: str, question: str, include_sugg
                         doc_citations.append({
                             "id": i + 1,
                             "page": doc.metadata.get("page", 1),
-                            "text": doc.page_content,
+                            "text": doc.page_content[:500] if doc.page_content else "",
                             "relevance_score": 0.8,
                             "doc_id": doc_id
                         })
@@ -481,12 +481,45 @@ Provide only relevant information (max 2 sentences). If no relevant info, respon
         # Ultra-fast fallback response
         fallback_answer = f"I understand you're asking about: {question}. This is an important topic. Based on general knowledge and best practices, I can provide that this involves multiple considerations including technical specifications, practical factors, regulatory requirements, and current standards. For the most comprehensive and accurate information, I recommend consulting current expert sources, documentation, and specialized resources relevant to your specific context."
         
+        # Try to get basic citations even in fallback
+        fallback_citations = []
+        fallback_most_referenced = None
+        try:
+            # Attempt basic document search for citations
+            if getattr(pdf_processor, 'use_database_storage', False):
+                docs = pdf_processor.query_document_vectors(doc_id, question, k=3)
+                for i, doc in enumerate(docs[:3]):
+                    fallback_citations.append({
+                        "id": i + 1,
+                        "page": doc.get("page", 1),
+                        "text": doc.get("text", "")[:200] + "...",
+                        "relevance_score": 0.5,
+                        "doc_id": doc_id
+                    })
+                if fallback_citations:
+                    fallback_most_referenced = fallback_citations[0]["page"]
+            else:
+                vs = pdf_processor.load_vectorstore(doc_id)
+                docs = vs.similarity_search(question, k=3)
+                for i, doc in enumerate(docs[:3]):
+                    fallback_citations.append({
+                        "id": i + 1,
+                        "page": doc.metadata.get("page", 1),
+                        "text": doc.page_content[:200] + "...",
+                        "relevance_score": 0.5,
+                        "doc_id": doc_id
+                    })
+                if fallback_citations:
+                    fallback_most_referenced = fallback_citations[0]["page"]
+        except Exception as e:
+            print(f"DEBUG: Could not get fallback citations: {e}")
+        
         return {
             "answer": fallback_answer,
             "suggestions": [],
-            "citations": [],
-            "most_referenced_page": None,
-            "has_document_content": False,
+            "citations": fallback_citations,
+            "most_referenced_page": fallback_most_referenced,
+            "has_document_content": bool(fallback_citations),
             "has_web_content": False
         }
 
@@ -934,11 +967,16 @@ def answer_question_with_suggestions(doc_id: str, question: str) -> str:
         if docs:
             for i, d in enumerate(docs[:3]):
                 if isinstance(d, dict):
-                    page = d.get('page', 'N/A')
+                    page = d.get('page', 1)
                     text = d.get('text', '')
                 else:
-                    page = getattr(d, 'metadata', {}).get('page', 'N/A') if hasattr(d, 'metadata') else 'N/A'
+                    page = getattr(d, 'metadata', {}).get('page', 1) if hasattr(d, 'metadata') else 1
                     text = getattr(d, 'page_content', '')
+                
+                # Ensure page is a valid number
+                if page == 'N/A' or page is None:
+                    page = 1
+                
                 suggestions.append({
                     "title": f"Page {page} Content",
                     "page": page,
@@ -947,7 +985,7 @@ def answer_question_with_suggestions(doc_id: str, question: str) -> str:
                 citations.append({
                     "id": i + 1,
                     "page": page,
-                    "text": text,
+                    "text": text[:500] if text else "",
                     "relevance_score": 1.0,
                     "doc_id": doc_id
                 })
@@ -994,12 +1032,40 @@ Provide a helpful and accurate answer. Include suggestions and cite relevant pag
         
     except Exception as e:
         print(f"DEBUG: Error in document RAG with suggestions: {e}")
+        # Try to provide basic citations even in error case
+        error_citations = []
+        try:
+            # Attempt basic document search for citations
+            if getattr(pdf_processor, 'use_database_storage', False):
+                docs = pdf_processor.query_document_vectors(doc_id, question, k=2)
+                for i, doc in enumerate(docs[:2]):
+                    error_citations.append({
+                        "id": i + 1,
+                        "page": doc.get("page", 1),
+                        "text": doc.get("text", "")[:200] + "..." if doc.get("text") else "",
+                        "relevance_score": 0.5,
+                        "doc_id": doc_id
+                    })
+            else:
+                vs = pdf_processor.load_vectorstore(doc_id)
+                docs = vs.similarity_search(question, k=2)
+                for i, doc in enumerate(docs[:2]):
+                    error_citations.append({
+                        "id": i + 1,
+                        "page": doc.metadata.get("page", 1),
+                        "text": doc.page_content[:200] + "..." if doc.page_content else "",
+                        "relevance_score": 0.5,
+                        "doc_id": doc_id
+                    })
+        except Exception as citation_error:
+            print(f"DEBUG: Could not get error fallback citations: {citation_error}")
+        
         # Provide a simple fallback response
         fallback_response = {
             "answer": f"I encountered an error while processing your question about: {question}. Please try rephrasing your question or check if the document is properly loaded.",
             "suggestions": [],
-            "citations": [],
-            "most_referenced_page": None
+            "citations": error_citations,
+            "most_referenced_page": error_citations[0]["page"] if error_citations else None
         }
         return json.dumps(fallback_response)
 

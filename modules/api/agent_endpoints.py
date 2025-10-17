@@ -199,7 +199,8 @@ Please handle this request using the most appropriate tool.
                 "page": page_number,
                 "type": "information",
                 "suggestions": suggestions,
-                "citations": []
+                "citations": [],
+                "most_referenced_page": None
             }
             return JSONResponse(content=response_content)
             
@@ -438,6 +439,7 @@ Please handle this request using the most appropriate tool.
                 "type": "information",
                 "suggestions": suggestions,
                 "citations": [],
+                "most_referenced_page": None,
                 "project_context": {"name": project["name"], "description": project["description"]}
             }
             return JSONResponse(content=response_content)
