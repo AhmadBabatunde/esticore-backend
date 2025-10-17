@@ -705,14 +705,7 @@ class DatabaseManager:
             # Migrate documents table if needed
             self.migrate_documents_table()
             
-            # Create test user if not exists
-            cur.execute("SELECT * FROM userdata WHERE email = %s", ("test@example.com",))
-            if not cur.fetchone():
-                test_password = hashlib.sha256("testuser1".encode()).hexdigest()
-                cur.execute(
-                    "INSERT INTO userdata (firstname, lastname, email, password) VALUES (%s, %s, %s, %s)",
-                    ("Test", "User", "test@example.com", test_password)
-                )
+           
                 
         elif self.use_rds:
             # MySQL table creation statements
