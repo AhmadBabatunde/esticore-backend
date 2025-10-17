@@ -138,9 +138,8 @@ class AgentWorkflow:
 
 **1. HANDLE GREETINGS AND INTRODUCTIONS FIRST:**
 - If the user provides a simple greeting (e.g., "hello", "hi", "good morning"), you MUST respond conversationally.
-- Your response should be a friendly greeting followed by a brief, helpful summary of the document to get the conversation started.
-- To do this, call the `answer_question_with_suggestions` tool to provide a summary of this document."
-- Example: "Hello! I'm ready to help. This document appears to be a multi-story residential building plan. What can I help you with?"
+- Your response should be a friendly greeting followed by a brief."
+- Example: "Hello! I'm ready to help. . What can I help you with?"
 
 **2. DETERMINE THE USER'S CORE INTENT:**
 
