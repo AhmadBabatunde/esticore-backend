@@ -96,16 +96,20 @@ async def verify_email(token: str):
     return auth_service.verify_email(token)
 
 @router.post("/verify-otp")
-async def verify_otp(email: str = Form(...), otp: str = Form(...)):
+async def verify_otp(
+    email: str = Form(...),
+    otp: str = Form(...),
+    purpose: str = Form("email_verification")
+):
     """
-    Verify email address using OTP code
+    Verify an OTP code for the specified purpose
     """
     if not email:
         raise HTTPException(status_code=400, detail="Email is required")
     if not otp:
         raise HTTPException(status_code=400, detail="OTP code is required")
-    
-    return auth_service.verify_email_otp(email, otp)
+
+    return auth_service.verify_otp(email, otp, purpose)
 
 @router.post("/resend-verification")
 async def resend_verification(email: str = Form(...)):
@@ -114,8 +118,29 @@ async def resend_verification(email: str = Form(...)):
     """
     if not email:
         raise HTTPException(status_code=400, detail="Email is required")
-    
+
     return auth_service.resend_verification_email(email)
+
+@router.post("/forgot-password")
+async def forgot_password(email: str = Form(...)):
+    """Trigger password reset OTP email"""
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    return auth_service.forgot_password(email)
+
+@router.post("/reset-password")
+async def reset_password(
+    email: str = Form(...),
+    otp: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...)
+):
+    """Reset password after OTP verification"""
+    if not email or not otp:
+        raise HTTPException(status_code=400, detail="Email and OTP are required")
+
+    return auth_service.reset_password(email, otp, new_password, confirm_password)
 
 @router.get("/google-oauth-test", response_class=HTMLResponse)
 async def google_oauth_test():

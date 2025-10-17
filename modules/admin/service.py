@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 from modules.config.settings import settings
 from modules.database import db_manager
+from modules.auth.service import auth_service
 from modules.admin.models import UserStatus, FeedbackType, SubscriptionInterval
 
 class AdminService:
@@ -156,6 +157,48 @@ class AdminService:
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error updating user status: {str(e)}")
+
+    def create_user_account(
+        self,
+        firstname: str,
+        lastname: str,
+        email: str,
+        password: str,
+        confirm_password: str,
+        mark_verified: bool = False
+    ) -> Dict[str, Any]:
+        """Create a user account from the admin dashboard"""
+
+        if not auth_service.validate_email_format(email):
+            raise HTTPException(status_code=400, detail="Invalid email format")
+
+        if password != confirm_password:
+            raise HTTPException(status_code=400, detail="Passwords do not match")
+
+        is_valid, error_msg = auth_service.validate_password_strength(password)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=error_msg)
+
+        existing_user = self.db.get_user_by_email(email)
+        if existing_user:
+            raise HTTPException(status_code=400, detail="User with this email already exists")
+
+        try:
+            user_id = self.db.create_user(firstname, lastname, email, password)
+
+            if mark_verified:
+                self.db.verify_user_email(user_id)
+
+            return {
+                "message": "User created successfully",
+                "user_id": user_id,
+                "firstname": firstname,
+                "lastname": lastname,
+                "email": email,
+                "verified": mark_verified
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to create user: {str(e)}")
     
     def get_user_storage_stats(self, user_id: int) -> Dict[str, Any]:
         """Get user storage usage statistics"""

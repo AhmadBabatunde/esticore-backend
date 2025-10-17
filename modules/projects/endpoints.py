@@ -202,6 +202,43 @@ async def add_documents_to_project(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Document upload failed: {str(e)}")
 
+@router.post("/{project_id}/share")
+async def share_project(
+    project_id: str,
+    inviter_id: int = Form(...),
+    invitee_email: str = Form(...),
+    role: str = Form("member")
+):
+    """Share a project with another user"""
+    try:
+        return project_service.share_project(project_id, inviter_id, invitee_email, role)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to share project: {str(e)}")
+
+@router.post("/invitations/{invitation_id}/respond")
+async def respond_to_invitation(
+    invitation_id: int,
+    user_id: int = Form(...),
+    accept: bool = Form(...)
+):
+    """Accept or reject a project invitation"""
+    try:
+        return project_service.respond_to_invitation(invitation_id, user_id, accept)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to respond to invitation: {str(e)}")
+
+@router.get("/invitations")
+async def list_invitations(user_id: int, status: Optional[str] = None):
+    """List invitations for a user"""
+    try:
+        return project_service.list_user_invitations(user_id, status)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load invitations: {str(e)}")
+
 @router.put("/{project_id}")
 async def update_project(
     project_id: str,
