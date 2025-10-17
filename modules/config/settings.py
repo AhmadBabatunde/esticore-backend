@@ -18,6 +18,8 @@ class Settings:
     
     # OpenAI Configuration
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+    # OpenAI model to use for Chat/OpenAI clients (configurable via env var OPENAI_MODEL)
+    OPENAI_MODEL = os.getenv('OPENAI_MODEL')
     
     # Google OAuth Configuration
     GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')

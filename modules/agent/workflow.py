@@ -120,11 +120,12 @@ class AgentWorkflow:
         self.memory = SimpleMemory()
         self.session_manager = session_manager
         self.context_resolver = context_resolver
-        
-        self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+
+        # Use model name from settings so it can be configured via environment variable OPENAI_MODEL
+        self.llm = ChatOpenAI(model=settings.OPENAI_MODEL, temperature=0.0, api_key=settings.OPENAI_API_KEY)
         self.agent = create_tool_calling_agent(self.llm, ALL_TOOLS, self._create_prompt())
         self.agent_executor = AgentExecutor(agent=self.agent, tools=ALL_TOOLS, verbose=True)
-        
+
         # Initialize LangGraph workflow
         self.workflow = self._create_workflow()
         self.compiled_graph = self.workflow.compile()
