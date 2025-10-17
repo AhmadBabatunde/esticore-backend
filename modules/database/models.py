@@ -2419,6 +2419,31 @@ class DatabaseManager:
         finally:
             conn.close()
     
+    def get_user_by_google_id(self, google_id: str) -> Optional[User]:
+        """Get user by Google ID"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"SELECT id, firstname, lastname, email, password, google_id, is_verified, verification_token, verification_token_expires, created_at, is_active, profile_image FROM userdata WHERE google_id = {placeholder}",
+                (google_id,)
+            )
+            row = cur.fetchone()
+            
+            if row:
+                return User(
+                    id=row[0], firstname=row[1], lastname=row[2], email=row[3], password=row[4],
+                    google_id=row[5], is_verified=bool(row[6]) if row[6] is not None else False,
+                    verification_token=row[7], verification_token_expires=row[8], created_at=row[9],
+                    is_active=bool(row[10]) if row[10] is not None else True,
+                    profile_image=row[11]
+                )
+            return None
+        finally:
+            conn.close()
+    
     def update_user_google_id(self, user_id: int, google_id: str):
         """Update user's Google ID"""
         conn = self.get_connection()
