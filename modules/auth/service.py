@@ -41,9 +41,50 @@ class AuthService:
                         continue
         return None
 
+    def _normalize_purpose(self, purpose: str) -> str:
+        """Normalize OTP purpose strings from various clients"""
+        if not purpose:
+            return "email_verification"
+
+        normalized = purpose.strip().lower().replace("-", "_").replace(" ", "_")
+        compact = "".join(ch for ch in normalized if ch.isalnum())
+
+        alias_map = {
+            "email_verification": "email_verification",
+            "emailverification": "email_verification",
+            "verify_email": "email_verification",
+            "verifyemail": "email_verification",
+            "verification": "email_verification",
+            "login": "login",
+            "signin": "login",
+            "sign_in": "login",
+            "password_reset": "password_reset",
+            "passwordreset": "password_reset",
+            "reset_password": "password_reset",
+            "resetpassword": "password_reset",
+        }
+
+        if normalized in alias_map:
+            return alias_map[normalized]
+        if compact in alias_map:
+            return alias_map[compact]
+        return normalized or "email_verification"
+
+    def _sanitize_otp(self, otp: str) -> str:
+        """Strip whitespace and formatting characters from OTP input"""
+        if otp is None:
+            return ""
+
+        cleaned = otp.strip()
+        # Remove common formatting characters that may be introduced by UI components
+        cleaned = cleaned.replace(" ", "")
+        cleaned = cleaned.replace("-", "")
+        return cleaned
+
     def _validate_otp(self, user: User, otp: str, purpose: str):
         """Validate OTP for a user and purpose"""
-        otp_record = self.db.get_user_otp(user.id, purpose)
+        normalized_purpose = self._normalize_purpose(purpose)
+        otp_record = self.db.get_user_otp(user.id, normalized_purpose)
         if not otp_record or otp_record.otp_code != otp:
             raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
@@ -54,7 +95,7 @@ class AuthService:
         if expires_at and expires_at < datetime.now():
             raise HTTPException(status_code=400, detail="OTP has expired")
 
-        return otp_record
+        return otp_record, normalized_purpose
 
     def validate_email_format(self, email: str) -> bool:
         """Validate email format"""
@@ -486,8 +527,9 @@ class AuthService:
         if not is_valid:
             raise HTTPException(status_code=400, detail=error_msg)
 
-        self._validate_otp(user, otp, "password_reset")
-        self.db.consume_user_otp(user.id, otp, "password_reset")
+        sanitized_otp = self._sanitize_otp(otp)
+        _, normalized_purpose = self._validate_otp(user, sanitized_otp, "password_reset")
+        self.db.consume_user_otp(user.id, sanitized_otp, normalized_purpose)
 
         if not self.db.update_user_password(user.id, new_password):
             raise HTTPException(status_code=500, detail="Failed to update password")
@@ -501,16 +543,19 @@ class AuthService:
     def verify_otp(self, email: str, otp: str, purpose: str = "email_verification") -> Dict[str, Any]:
         """Verify OTP for a specific purpose"""
         try:
-            user = self.db.get_user_by_email(email)
+            sanitized_email = email.strip() if email else email
+            sanitized_otp = self._sanitize_otp(otp)
+
+            user = self.db.get_user_by_email(sanitized_email)
             if not user:
                 raise HTTPException(status_code=404, detail="User not found")
 
-            otp_record = self._validate_otp(user, otp, purpose)
+            _otp_record, normalized_purpose = self._validate_otp(user, sanitized_otp, purpose)
 
             # Mark OTP as consumed
-            self.db.consume_user_otp(user.id, otp, purpose)
+            self.db.consume_user_otp(user.id, sanitized_otp, normalized_purpose)
 
-            if purpose == "email_verification":
+            if normalized_purpose == "email_verification":
                 if user.is_verified:
                     return {
                         "message": "Email already verified",
@@ -535,7 +580,7 @@ class AuthService:
                     "verified": True
                 }
 
-            if purpose == "login":
+            if normalized_purpose == "login":
                 access_token = self.generate_token(user.id, user.email)
 
                 return {
@@ -550,7 +595,7 @@ class AuthService:
                     "token_type": "bearer"
                 }
 
-            if purpose == "password_reset":
+            if normalized_purpose == "password_reset":
                 return {
                     "message": "OTP verified",
                     "user_id": user.id,
@@ -563,7 +608,7 @@ class AuthService:
                 "user_id": user.id,
                 "email": user.email,
                 "otp_verified": True,
-                "purpose": purpose
+                "purpose": normalized_purpose
             }
 
         except HTTPException:
