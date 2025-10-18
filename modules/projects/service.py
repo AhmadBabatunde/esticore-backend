@@ -167,11 +167,6 @@ class ProjectService:
                     "id": user.id,
                     "firstname": user.firstname,
                     "lastname": user.lastname,
-                    "email": user.email,
-                    "google_id": getattr(user, 'google_id', None),
-                    "is_verified": getattr(user, 'is_verified', None),
-                    "created_at": getattr(user, 'created_at', None),
-                    "is_active": getattr(user, 'is_active', None),
                     "profile_image": getattr(user, 'profile_image', None)
                 }
 
@@ -186,11 +181,6 @@ class ProjectService:
                     "id": owner_user.id,
                     "firstname": owner_user.firstname,
                     "lastname": owner_user.lastname,
-                    "email": owner_user.email,
-                    "google_id": getattr(owner_user, 'google_id', None),
-                    "is_verified": getattr(owner_user, 'is_verified', None),
-                    "created_at": getattr(owner_user, 'created_at', None),
-                    "is_active": getattr(owner_user, 'is_active', None),
                     "profile_image": getattr(owner_user, 'profile_image', None)
                 }
         except Exception:
@@ -235,17 +225,12 @@ class ProjectService:
             try:
                 owner_user = self.db.get_user_by_id(project.user_id)
                 if owner_user:
-                    owner = {
-                        "id": owner_user.id,
-                        "firstname": owner_user.firstname,
-                        "lastname": owner_user.lastname,
-                        "email": owner_user.email,
-                        "google_id": getattr(owner_user, 'google_id', None),
-                        "is_verified": getattr(owner_user, 'is_verified', None),
-                        "created_at": getattr(owner_user, 'created_at', None),
-                        "is_active": getattr(owner_user, 'is_active', None),
-                        "profile_image": getattr(owner_user, 'profile_image', None)
-                    }
+                        owner = {
+                            "id": owner_user.id,
+                            "firstname": owner_user.firstname,
+                            "lastname": owner_user.lastname,
+                            "profile_image": getattr(owner_user, 'profile_image', None)
+                        }
             except Exception:
                 owner = None
 
