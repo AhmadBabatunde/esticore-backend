@@ -3282,30 +3282,41 @@ class DatabaseManager:
         conn = self.get_connection()
         cur = conn.cursor()
         placeholder = self._get_placeholder()
-        
+
+        allowed_columns = {
+            'plan_id': 'plan_id',
+            'stripe_subscription_id': 'stripe_subscription_id',
+            'stripe_customer_id': 'stripe_customer_id',
+            'current_period_start': 'current_period_start',
+            'current_period_end': 'current_period_end',
+            'status': 'status',
+            'interval': '`interval`',
+            'auto_renew': 'auto_renew',
+            'is_active': 'is_active',
+        }
+
         try:
             update_fields = []
             params = []
-            
+
             for key, value in kwargs.items():
-                if value is not None:
-                    # FIXED: Use backticks around interval if it's in the kwargs
-                    if key == 'interval':
-                        update_fields.append("`interval` = ?")
-                    else:
-                        update_fields.append(f"{key} = ?")
-                    params.append(value)
-            
+                if value is None or key not in allowed_columns:
+                    continue
+
+                column_name = allowed_columns[key]
+                update_fields.append(f"{column_name} = {placeholder}")
+                params.append(value)
+
             if not update_fields:
                 return False
-            
+
             if self.use_rds:
                 update_fields.append("updated_at = CURRENT_TIMESTAMP")
             else:
                 update_fields.append("updated_at = datetime('now')")
-            
+
             params.append(subscription_id)
-            query = f"UPDATE user_subscriptions SET {', '.join(update_fields)} WHERE id = ?"
+            query = f"UPDATE user_subscriptions SET {', '.join(update_fields)} WHERE id = {placeholder}"
             cur.execute(query, params)
             conn.commit()
             return cur.rowcount > 0
