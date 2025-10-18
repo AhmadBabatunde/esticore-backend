@@ -1,13 +1,13 @@
-"""
-Feedback API endpoints for the Floor Plan Agent API
-"""
-from fastapi import APIRouter, HTTPException, Depends, Form
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+"""Feedback API endpoints for the Floor Plan Agent API."""
+
 from typing import Optional
 
-from modules.feedback.service import feedback_service as FeedbackService
-from modules.auth.service import auth_service
+from fastapi import APIRouter, Depends, Form, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
 from modules.admin.models import FeedbackType
+from modules.auth.service import auth_service
+from modules.feedback.service import feedback_service
 
 router = APIRouter(prefix="/feedback", tags=["feedback"])
 security = HTTPBearer()
@@ -15,7 +15,6 @@ security = HTTPBearer()
 def verify_user_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Dependency to verify user JWT token"""
     token = credentials.credentials
-    print("token = ", token)
     user_id = auth_service.verify_token(token)
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid or expired token")

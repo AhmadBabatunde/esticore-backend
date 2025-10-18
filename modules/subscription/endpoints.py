@@ -1,14 +1,10 @@
-"""
-Subscription API endpoints for the Floor Plan Agent API
-"""
-from fastapi import APIRouter, HTTPException, Depends, Form, Request
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from typing import Optional
-import stripe
+"""Subscription API endpoints for the Floor Plan Agent API."""
 
-from modules.subscription.service import Subscription_Service  
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
 from modules.auth.service import auth_service
-from modules.config.settings import settings
+from modules.subscription.service import Subscription_Service
 
 router = APIRouter(prefix="/subscription", tags=["subscription"])
 security = HTTPBearer()
@@ -24,7 +20,6 @@ def verify_user_token(credentials: HTTPAuthorizationCredentials = Depends(securi
 @router.get("/plans")
 async def get_subscription_plans():
     """Get all available subscription plans"""
-    print("route hit")
     return Subscription_Service.get_available_plans()
 
 @router.get("/user")
