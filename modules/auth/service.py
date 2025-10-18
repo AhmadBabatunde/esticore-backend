@@ -86,7 +86,13 @@ class AuthService:
         normalized_purpose = self._normalize_purpose(purpose)
         otp_record = self.db.get_user_otp(user.id, normalized_purpose)
         if not otp_record or otp_record.otp_code != otp:
-            raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+            fallback_record = self.db.get_user_otp_by_code(user.id, otp) if otp else None
+            if fallback_record:
+                # Allow legacy clients that omit the purpose field to continue working
+                normalized_purpose = self._normalize_purpose(fallback_record.purpose)
+                otp_record = fallback_record
+            else:
+                raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
         if otp_record.consumed_at:
             raise HTTPException(status_code=400, detail="OTP already used")

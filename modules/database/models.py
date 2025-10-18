@@ -3588,6 +3588,33 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def get_user_otp_by_code(self, user_id: int, otp_code: str) -> Optional[UserOTP]:
+        """Retrieve the most recent active OTP for a user by code regardless of purpose"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"SELECT id, user_id, otp_code, purpose, expires_at, created_at, consumed_at FROM user_otp_codes WHERE user_id = {placeholder} AND otp_code = {placeholder} ORDER BY created_at DESC LIMIT 1",
+                (user_id, otp_code)
+            )
+            row = cur.fetchone()
+
+            if row:
+                return UserOTP(
+                    id=row[0],
+                    user_id=row[1],
+                    otp_code=row[2],
+                    purpose=row[3],
+                    expires_at=row[4],
+                    created_at=row[5],
+                    consumed_at=row[6]
+                )
+            return None
+        finally:
+            conn.close()
+
     def consume_user_otp(self, user_id: int, otp_code: str, purpose: str) -> bool:
         """Mark an OTP as consumed"""
         conn = self.get_connection()
