@@ -27,7 +27,8 @@ CLIENT = InferenceHTTPClient(
 )
 
 # Initialize tokenizer for chunking
-tokenizer = tiktoken.encoding_for_model("gpt-4o-mini")
+# Use model name from settings so tokenizer model can be configured via OPENAI_MODEL
+tokenizer = tiktoken.encoding_for_model(settings.OPENAI_MODEL)
 
 def estimate_tokens(text: str) -> int:
     """Estimate the number of tokens in a text string."""
@@ -123,7 +124,7 @@ def combine_chunk_responses(responses: List[str], question: str) -> str:
     combined_text = "\n\n".join([f"Section {i+1}: {resp}" for i, resp in enumerate(responses)])
     
     # Use LLM to synthesize the combined responses
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+    llm = ChatOpenAI(model=settings.OPENAI_MODEL, temperature=0.0, api_key=settings.OPENAI_API_KEY)
     synthesis_prompt = f"""I have gathered information from multiple sections of a document to answer this question: {question}
 
 Combined information from all sections:
@@ -200,7 +201,7 @@ def create_comprehensive_answer(doc_content: str, web_content: str, question: st
                 citation_text += f"[{citation['id']}] Page {citation['page']}\n"
         
         # Use LLM to create comprehensive answer
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+        llm = ChatOpenAI(model=settings.OPENAI_MODEL, temperature=0.0, api_key=settings.OPENAI_API_KEY)
         comprehensive_prompt = f"""Based on the following information sources, provide a comprehensive and detailed answer to the user's question. Synthesize information from both the document content (including any visual analysis) and current web sources to give the most complete response possible.
 
 QUESTION: {question}
@@ -303,7 +304,7 @@ def process_question_with_hybrid_search(doc_id: str, question: str, include_sugg
                         doc_citations.append({
                             "id": i + 1,
                             "page": doc.get("page", 1),
-                            "text": doc.get("text", ""),
+                            "text": doc.get("text", "")[:500] if doc.get("text") else "",
                             "relevance_score": 0.8,
                             "doc_id": doc_id
                         })
@@ -311,7 +312,7 @@ def process_question_with_hybrid_search(doc_id: str, question: str, include_sugg
                         doc_citations.append({
                             "id": i + 1,
                             "page": doc.metadata.get("page", 1),
-                            "text": doc.page_content,
+                            "text": doc.page_content[:500] if doc.page_content else "",
                             "relevance_score": 0.8,
                             "doc_id": doc_id
                         })
@@ -382,7 +383,7 @@ def process_question_with_hybrid_search(doc_id: str, question: str, include_sugg
                 else:
                     # Process multiple chunks quickly
                     chunk_responses = []
-                    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+                    llm = ChatOpenAI(model=settings.OPENAI_MODEL, temperature=0.0, api_key=settings.OPENAI_API_KEY)
                     
                     for chunk_info in chunks[:3]:  # Limit to 3 chunks for speed
                         prompt = f"""Extract key information from this document section for: {question}
@@ -481,12 +482,45 @@ Provide only relevant information (max 2 sentences). If no relevant info, respon
         # Ultra-fast fallback response
         fallback_answer = f"I understand you're asking about: {question}. This is an important topic. Based on general knowledge and best practices, I can provide that this involves multiple considerations including technical specifications, practical factors, regulatory requirements, and current standards. For the most comprehensive and accurate information, I recommend consulting current expert sources, documentation, and specialized resources relevant to your specific context."
         
+        # Try to get basic citations even in fallback
+        fallback_citations = []
+        fallback_most_referenced = None
+        try:
+            # Attempt basic document search for citations
+            if getattr(pdf_processor, 'use_database_storage', False):
+                docs = pdf_processor.query_document_vectors(doc_id, question, k=3)
+                for i, doc in enumerate(docs[:3]):
+                    fallback_citations.append({
+                        "id": i + 1,
+                        "page": doc.get("page", 1),
+                        "text": doc.get("text", "")[:200] + "...",
+                        "relevance_score": 0.5,
+                        "doc_id": doc_id
+                    })
+                if fallback_citations:
+                    fallback_most_referenced = fallback_citations[0]["page"]
+            else:
+                vs = pdf_processor.load_vectorstore(doc_id)
+                docs = vs.similarity_search(question, k=3)
+                for i, doc in enumerate(docs[:3]):
+                    fallback_citations.append({
+                        "id": i + 1,
+                        "page": doc.metadata.get("page", 1),
+                        "text": doc.page_content[:200] + "...",
+                        "relevance_score": 0.5,
+                        "doc_id": doc_id
+                    })
+                if fallback_citations:
+                    fallback_most_referenced = fallback_citations[0]["page"]
+        except Exception as e:
+            print(f"DEBUG: Could not get fallback citations: {e}")
+        
         return {
             "answer": fallback_answer,
             "suggestions": [],
-            "citations": [],
-            "most_referenced_page": None,
-            "has_document_content": False,
+            "citations": fallback_citations,
+            "most_referenced_page": fallback_most_referenced,
+            "has_document_content": bool(fallback_citations),
             "has_web_content": False
         }
 
@@ -795,7 +829,7 @@ def answer_question_using_rag(doc_id: str, question: str) -> str:
             return "I couldn't find any relevant information in the document to answer your question."
 
         # Use LLM to generate a response based on the context
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+        llm = ChatOpenAI(model=settings.OPENAI_MODEL, temperature=0.0, api_key=settings.OPENAI_API_KEY)
         prompt = f"""Based on the following context from the document, answer the user's question concisely.
 
 Context:
@@ -866,8 +900,8 @@ def analyze_pdf_page_multimodal(doc_id: str, page_number: int = 1) -> str:
             page_text = raw_text
         
         # Use multimodal LLM to analyze both image and text
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
-        
+        llm = ChatOpenAI(model=settings.OPENAI_MODEL, temperature=0.0, api_key=settings.OPENAI_API_KEY)
+
         # OPTIMIZATION: Shorter, more focused prompt for faster processing
         message_content = [
             {
@@ -934,11 +968,16 @@ def answer_question_with_suggestions(doc_id: str, question: str) -> str:
         if docs:
             for i, d in enumerate(docs[:3]):
                 if isinstance(d, dict):
-                    page = d.get('page', 'N/A')
+                    page = d.get('page', 1)
                     text = d.get('text', '')
                 else:
-                    page = getattr(d, 'metadata', {}).get('page', 'N/A') if hasattr(d, 'metadata') else 'N/A'
+                    page = getattr(d, 'metadata', {}).get('page', 1) if hasattr(d, 'metadata') else 1
                     text = getattr(d, 'page_content', '')
+                
+                # Ensure page is a valid number
+                if page == 'N/A' or page is None:
+                    page = 1
+                
                 suggestions.append({
                     "title": f"Page {page} Content",
                     "page": page,
@@ -947,14 +986,14 @@ def answer_question_with_suggestions(doc_id: str, question: str) -> str:
                 citations.append({
                     "id": i + 1,
                     "page": page,
-                    "text": text,
+                    "text": text[:500] if text else "",
                     "relevance_score": 1.0,
                     "doc_id": doc_id
                 })
             most_referenced_page = citations[0]["page"] if citations else None
 
         # Use LLM to generate a response based on the context
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+        llm = ChatOpenAI(model=settings.OPENAI_MODEL, temperature=0.0, api_key=settings.OPENAI_API_KEY)
         prompt = f"""Based on the following context from the document, answer the user's question and provide related topic suggestions with page numbers.
 
 Context:
@@ -994,12 +1033,40 @@ Provide a helpful and accurate answer. Include suggestions and cite relevant pag
         
     except Exception as e:
         print(f"DEBUG: Error in document RAG with suggestions: {e}")
+        # Try to provide basic citations even in error case
+        error_citations = []
+        try:
+            # Attempt basic document search for citations
+            if getattr(pdf_processor, 'use_database_storage', False):
+                docs = pdf_processor.query_document_vectors(doc_id, question, k=2)
+                for i, doc in enumerate(docs[:2]):
+                    error_citations.append({
+                        "id": i + 1,
+                        "page": doc.get("page", 1),
+                        "text": doc.get("text", "")[:200] + "..." if doc.get("text") else "",
+                        "relevance_score": 0.5,
+                        "doc_id": doc_id
+                    })
+            else:
+                vs = pdf_processor.load_vectorstore(doc_id)
+                docs = vs.similarity_search(question, k=2)
+                for i, doc in enumerate(docs[:2]):
+                    error_citations.append({
+                        "id": i + 1,
+                        "page": doc.metadata.get("page", 1),
+                        "text": doc.page_content[:200] + "..." if doc.page_content else "",
+                        "relevance_score": 0.5,
+                        "doc_id": doc_id
+                    })
+        except Exception as citation_error:
+            print(f"DEBUG: Could not get error fallback citations: {citation_error}")
+        
         # Provide a simple fallback response
         fallback_response = {
             "answer": f"I encountered an error while processing your question about: {question}. Please try rephrasing your question or check if the document is properly loaded.",
             "suggestions": [],
-            "citations": [],
-            "most_referenced_page": None
+            "citations": error_citations,
+            "most_referenced_page": error_citations[0]["page"] if error_citations else None
         }
         return json.dumps(fallback_response)
 

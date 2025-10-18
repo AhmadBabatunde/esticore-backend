@@ -147,21 +147,51 @@ class ProjectService:
             
             document_info.append(doc_info)
         
+        # Include project members with basic user info (exclude password)
         members = self.db.get_project_members(project_id)
-        member_info = [
-            {
+        member_info = []
+        for member in members:
+            try:
+                user = self.db.get_user_by_id(member.user_id)
+            except Exception:
+                user = None
+
+            member_entry = {
                 "user_id": member.user_id,
                 "role": member.role,
                 "joined_at": member.created_at
             }
-            for member in members
-        ]
+
+            if user:
+                member_entry["user"] = {
+                    "id": user.id,
+                    "firstname": user.firstname,
+                    "lastname": user.lastname,
+                    "profile_image": getattr(user, 'profile_image', None)
+                }
+
+            member_info.append(member_entry)
+
+        # Include project owner/creator details (exclude password)
+        owner = None
+        try:
+            owner_user = self.db.get_user_by_id(project.user_id)
+            if owner_user:
+                owner = {
+                    "id": owner_user.id,
+                    "firstname": owner_user.firstname,
+                    "lastname": owner_user.lastname,
+                    "profile_image": getattr(owner_user, 'profile_image', None)
+                }
+        except Exception:
+            owner = None
 
         return {
             "project_id": project.project_id,
             "name": project.name,
             "description": project.description,
             "user_id": project.user_id,
+            "owner": owner,
             "documents": document_info if document_info else None,
             "created_at": project.created_at,
             "updated_at": project.updated_at,
@@ -190,11 +220,26 @@ class ProjectService:
                 }
                 document_info.append(doc_info)
             
+            # Attach owner details
+            owner = None
+            try:
+                owner_user = self.db.get_user_by_id(project.user_id)
+                if owner_user:
+                        owner = {
+                            "id": owner_user.id,
+                            "firstname": owner_user.firstname,
+                            "lastname": owner_user.lastname,
+                            "profile_image": getattr(owner_user, 'profile_image', None)
+                        }
+            except Exception:
+                owner = None
+
             result.append({
                 "project_id": project.project_id,
                 "name": project.name,
                 "description": project.description,
                 "user_id": project.user_id,
+                "owner": owner,
                 "documents": document_info if document_info else None,
                 "created_at": project.created_at,
                 "updated_at": project.updated_at,
@@ -225,6 +270,7 @@ class ProjectService:
                 "name": project.name,
                 "description": project.description,
                 "user_id": project.user_id,
+                "owner": None,
                 "documents": document_info if document_info else None,
                 "created_at": project.created_at,
                 "updated_at": project.updated_at,
