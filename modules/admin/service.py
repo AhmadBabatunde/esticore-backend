@@ -7,10 +7,10 @@ from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
 import secrets
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
-from fastapi import HTTPException
+from fastapi import HTTPException, status
 
 from modules.config.settings import settings
-from modules.database import db_manager
+from modules.database import db_manager, User
 from modules.auth.service import auth_service
 from modules.admin.models import UserStatus, FeedbackType, SubscriptionInterval
 
@@ -41,6 +41,7 @@ class AdminService:
             "username": admin.username,
             "email": admin.email,
             "is_super_admin": admin.is_super_admin,
+            "access_token": token,
             "token": token,
             "token_type": "bearer"
         }
@@ -407,13 +408,46 @@ class AdminService:
             
             # Get feedback from database
             feedback_list = self.db.get_all_feedback(page, limit, rating)
-            
+
+            formatted_feedback = []
+            user_cache: Dict[int, Optional[User]] = {}
+            for feedback in feedback_list:
+                if feedback.user_id in user_cache:
+                    user = user_cache[feedback.user_id]
+                else:
+                    user = self.db.get_user_by_id(feedback.user_id)
+                    user_cache[feedback.user_id] = user
+
+                created_at = feedback.created_at
+                if isinstance(created_at, datetime):
+                    created_at_str = created_at.isoformat()
+                elif created_at is None:
+                    created_at_str = None
+                else:
+                    created_at_str = str(created_at)
+
+                rating_value = feedback.rating.value if isinstance(feedback.rating, FeedbackType) else str(feedback.rating)
+
+                formatted_feedback.append({
+                    "id": feedback.id,
+                    "user_id": feedback.user_id,
+                    "rating": rating_value,
+                    "comment": getattr(feedback, "comment", None) or feedback.project_name or "",
+                    "ai_response": feedback.ai_response,
+                    "created_at": created_at_str,
+                    "user": {
+                        "firstname": user.firstname if user else "",
+                        "lastname": user.lastname if user else "",
+                        "email": user.email if user else feedback.email
+                    }
+                })
+
             # Calculate pagination metadata
             total_feedback = self.db.get_total_feedback_count(rating)
             total_pages = (total_feedback + limit - 1) // limit if total_feedback > 0 else 1
-            
+
             return {
-                "feedback": feedback_list,
+                "feedback": formatted_feedback,
                 "pagination": {
                     "page": page,
                     "limit": limit,
