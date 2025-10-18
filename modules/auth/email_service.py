@@ -30,6 +30,35 @@ class EmailService:
         """Generate a 6-digit OTP code"""
         return str(random.randint(100000, 999999))
 
+    def _normalize_purpose(self, purpose: str) -> str:
+        """Normalize OTP purpose so it aligns with the authentication service"""
+        if not purpose:
+            return "email_verification"
+
+        normalized = purpose.strip().lower().replace("-", "_").replace(" ", "_")
+        compact = "".join(ch for ch in normalized if ch.isalnum())
+
+        alias_map = {
+            "email_verification": "email_verification",
+            "emailverification": "email_verification",
+            "verify_email": "email_verification",
+            "verifyemail": "email_verification",
+            "verification": "email_verification",
+            "login": "login",
+            "signin": "login",
+            "sign_in": "login",
+            "password_reset": "password_reset",
+            "passwordreset": "password_reset",
+            "reset_password": "password_reset",
+            "resetpassword": "password_reset",
+        }
+
+        if normalized in alias_map:
+            return alias_map[normalized]
+        if compact in alias_map:
+            return alias_map[compact]
+        return normalized or "email_verification"
+
     def _compose_otp_email(
         self,
         firstname: str,
@@ -125,14 +154,19 @@ class EmailService:
         footer_note: Optional[str] = None
     ) -> bool:
         """Send OTP email with shared layout"""
-        if not self.is_configured():
-            print("WARNING: Email service not configured - OTP email not sent")
-            return False
-
+        normalized_purpose = self._normalize_purpose(purpose)
         otp_code = self.generate_verification_token()
         expires_at = datetime.now() + timedelta(minutes=expiry_minutes)
 
-        db_manager.create_verification_token(user_id, otp_code, expires_at, purpose=purpose)
+        db_manager.create_verification_token(user_id, otp_code, expires_at, purpose=normalized_purpose)
+
+        if not self.is_configured():
+            print("WARNING: Email service not configured - OTP email not sent")
+            print(
+                f"DEBUG: Generated OTP {otp_code} for user {user_id} ({normalized_purpose}), "
+                f"expires at {expires_at.isoformat()}"
+            )
+            return False
 
         html_body, text_body = self._compose_otp_email(
             firstname=firstname,
