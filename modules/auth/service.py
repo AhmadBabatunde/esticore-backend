@@ -85,7 +85,6 @@ class AuthService:
         """Validate OTP for a user and purpose"""
         normalized_purpose = self._normalize_purpose(purpose)
         otp_record = self.db.get_user_otp(user.id, normalized_purpose)
-
         if not otp_record or otp_record.otp_code != otp:
             fallback_record = self.db.get_user_otp_by_code(user.id, otp) if otp else None
             if fallback_record:
