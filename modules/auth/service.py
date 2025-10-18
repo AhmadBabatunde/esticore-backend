@@ -536,6 +536,8 @@ class AuthService:
                 }
 
             if purpose == "login":
+                access_token = self.generate_token(user.id, user.email)
+
                 return {
                     "message": "Login successful",
                     "user_id": user.id,
@@ -543,7 +545,9 @@ class AuthService:
                     "lastname": user.lastname,
                     "email": user.email,
                     "verified": user.is_verified,
-                    "otp_verified": True
+                    "otp_verified": True,
+                    "access_token": access_token,
+                    "token_type": "bearer"
                 }
 
             if purpose == "password_reset":
