@@ -1,7 +1,7 @@
 """
 Session management API endpoints
 """
-from fastapi import APIRouter, HTTPException, Form
+from fastapi import APIRouter, HTTPException, Form, Depends
 from typing import Dict, Any
 
 from modules.session import session_manager, maintenance_service
@@ -11,6 +11,7 @@ from modules.session.exceptions import (
 )
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+from modules.auth.deps import get_current_user_id
 
 @router.get("/status")
 async def get_session_status():
@@ -35,9 +36,12 @@ async def force_session_cleanup(hours: int = Form(None)):
         raise HTTPException(status_code=500, detail=f"Error during session cleanup: {str(e)}")
 
 @router.get("/user/{user_id}")
-async def get_user_sessions(user_id: int):
+async def get_user_sessions(user_id: int, current_user_id: int = Depends(get_current_user_id)):
     """Get all active sessions for a user"""
     try:
+        # Ensure the caller is the same user or has admin privileges (admin checks can be added later)
+        if user_id != current_user_id:
+            raise HTTPException(status_code=403, detail="Access denied to requested user's sessions")
         sessions = session_manager.get_active_sessions(user_id)
         return {
             "user_id": user_id,
@@ -57,12 +61,14 @@ async def get_user_sessions(user_id: int):
         raise HTTPException(status_code=500, detail=f"Error getting user sessions: {str(e)}")
 
 @router.get("/user/{user_id}/context/{context_type}")
-async def get_user_context_sessions(user_id: int, context_type: str):
+async def get_user_context_sessions(user_id: int, context_type: str, current_user_id: int = Depends(get_current_user_id)):
     """Get active sessions for a user filtered by context type"""
     try:
         if context_type not in ['PROJECT', 'DOCUMENT', 'GENERAL']:
             raise HTTPException(status_code=400, detail="Invalid context_type. Must be PROJECT, DOCUMENT, or GENERAL")
-        
+        # Ensure the caller is the same user
+        if user_id != current_user_id:
+            raise HTTPException(status_code=403, detail="Access denied to requested user's sessions")
         sessions = session_manager.get_active_sessions(user_id, context_type)
         return {
             "user_id": user_id,
@@ -84,9 +90,12 @@ async def get_user_context_sessions(user_id: int, context_type: str):
         raise HTTPException(status_code=500, detail=f"Error getting user context sessions: {str(e)}")
 
 @router.post("/user/{user_id}/session/{session_id}/deactivate")
-async def deactivate_session(user_id: int, session_id: str):
+async def deactivate_session(user_id: int, session_id: str, current_user_id: int = Depends(get_current_user_id)):
     """Deactivate a specific session"""
     try:
+        # Ensure the caller is the same user
+        if user_id != current_user_id:
+            raise HTTPException(status_code=403, detail="Access denied to requested user's session")
         # Validate session access
         if not session_manager.validate_session_access(session_id, user_id):
             raise HTTPException(status_code=403, detail="Access denied to session")
@@ -108,9 +117,12 @@ async def deactivate_session(user_id: int, session_id: str):
         raise HTTPException(status_code=500, detail=f"Error deactivating session: {str(e)}")
 
 @router.get("/session/{session_id}/context")
-async def get_session_context(session_id: str, user_id: int = Form(...)):
+async def get_session_context(session_id: str, user_id: int = Form(...), current_user_id: int = Depends(get_current_user_id)):
     """Get context information for a session"""
     try:
+        # Ensure the caller is the same user
+        if user_id != current_user_id:
+            raise HTTPException(status_code=403, detail="Access denied to requested session context")
         # Validate session access
         if not session_manager.validate_session_access(session_id, user_id):
             raise HTTPException(status_code=403, detail="Access denied to session")

@@ -2,13 +2,14 @@
 Optimized project endpoints with async PDF processing
 """
 import asyncio
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends
 from typing import Optional, List
 from modules.projects.service import project_service
 from modules.agent.workflow import agent_workflow
 from modules.database import db_manager
 from modules.session import session_manager
 from modules.pdf_processing.service import pdf_processor
+from modules.auth.deps import get_current_user_id
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -16,7 +17,7 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 async def add_documents_to_project_fast(
     background_tasks: BackgroundTasks,
     project_id: str,
-    user_id: int = Form(...),
+    user_id: int = Depends(get_current_user_id),
     files: List[UploadFile] = File(...)
 ):
     """
@@ -120,7 +121,7 @@ async def process_uploaded_documents(project_id: str, user_id: int, uploaded_fil
         print(f"❌ Background processing failed for project {project_id}: {e}")
 
 @router.get("/{project_id}/upload-status")
-async def get_upload_status(project_id: str, user_id: int):
+async def get_upload_status(project_id: str, user_id: int = Depends(get_current_user_id)):
     """
     Get the status of document uploads for a project
     """
@@ -155,7 +156,7 @@ async def get_upload_status(project_id: str, user_id: int):
 @router.post("/{project_id}/upload-documents-chunked")
 async def upload_documents_chunked(
     project_id: str,
-    user_id: int = Form(...),
+    user_id: int = Depends(get_current_user_id),
     files: List[UploadFile] = File(...)
 ):
     """

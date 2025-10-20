@@ -2,15 +2,17 @@
 PDF processing API endpoints for the Floor Plan Agent API
 """
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import Depends
 from typing import List
 from modules.pdf_processing.service import pdf_processor
+from modules.auth.deps import get_current_user_id
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 @router.post("/upload")
 async def upload_pdf(files: List[UploadFile] = File(...), user_id: int = Form(...)):
     """
-    Upload and index PDF document(s) - supports both single and multiple files
+    Upload and index PDF document(s) - supports both single and multiple files, requires JWT
     """
     try:
         print(f"Debug: received {len(files)} files for upload")
@@ -36,7 +38,7 @@ async def upload_pdf(files: List[UploadFile] = File(...), user_id: int = Form(..
         if len(valid_files) == 1:
             file = valid_files[0]
             file_content = await file.read()
-            result = pdf_processor.upload_and_index_pdf(file_content, file.filename, user_id)
+            result = pdf_processor.upload_and_index_pdf(file_content, file.filename, Depends(get_current_user_id))
             print(f"Debug: single file upload result: {result}")
             return result
         
@@ -64,7 +66,7 @@ async def upload_pdf(files: List[UploadFile] = File(...), user_id: int = Form(..
 @router.post("/upload-multiple")
 async def upload_multiple_pdfs(files: List[UploadFile] = File(...), user_id: int = Form(...)):
     """
-    Upload and index multiple PDF documents
+    Upload and index multiple PDF documents, requires JWT
     """
     try:
         print(f"Debug: received {len(files)} files for upload")
@@ -97,7 +99,7 @@ async def upload_multiple_pdfs(files: List[UploadFile] = File(...), user_id: int
             print(f"Debug: processed file {file.filename}, size: {len(content)} bytes")
         
         # Process files
-        result = pdf_processor.upload_and_index_multiple_pdfs(file_contents, filenames, user_id)
+        result = pdf_processor.upload_and_index_multiple_pdfs(file_contents, filenames, Depends(get_current_user_id))
         print(f"Debug: upload result: {result}")
         
         return result
@@ -113,7 +115,7 @@ def list_documents(user_id: int = None):
     """
     List all uploaded documents, optionally filtered by user
     """
-    return pdf_processor.list_documents(user_id)
+    return pdf_processor.list_documents(user_id if user_id is not None else Depends(get_current_user_id))
 
 @router.get("/{doc_id}")
 def get_document_info(doc_id: str):
@@ -164,6 +166,9 @@ def delete_document(doc_id: str, user_id: int = None):
     try:
         # If user_id is provided, verify ownership
         if user_id is not None:
+            current_user_id = Depends(get_current_user_id)
+            if user_id != current_user_id:
+                raise HTTPException(status_code=403, detail="Access denied: caller mismatch")
             doc_info = pdf_processor.get_document_info(doc_id)
             if doc_info.get("user_id") != user_id:
                 raise HTTPException(status_code=403, detail="Access denied: You don't own this document")
@@ -184,7 +189,8 @@ def delete_user_documents(user_id: int):
     Delete all documents for a specific user
     """
     try:
-        documents = pdf_processor.list_documents(user_id)
+        current_user_id = Depends(get_current_user_id)
+        documents = pdf_processor.list_documents(user_id if user_id == current_user_id else None)
         deleted_count = 0
         failed_deletions = []
         

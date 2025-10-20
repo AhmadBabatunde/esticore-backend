@@ -5,7 +5,7 @@ import os
 import uuid
 import re
 import json
-from fastapi import APIRouter, BackgroundTasks, Form, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Form, HTTPException, Depends
 from fastapi.responses import FileResponse, JSONResponse
 from langchain_core.messages import HumanMessage
 
@@ -17,6 +17,7 @@ from modules.agent import agent_workflow
 from modules.agent.tools import process_question_with_hybrid_search
 from modules.projects.service import project_service
 from modules.session import session_manager, context_resolver
+from modules.auth.deps import get_current_user_id
 
 def extract_manual_suggestions(text: str) -> list:
     """Extract manually formatted suggestions from the response text."""
@@ -120,7 +121,7 @@ async def unified_agent(
     background_tasks: BackgroundTasks,
     doc_id: str = Form(...),
     user_instruction: str = Form(...),
-    user_id: int = Form(...),
+    user_id: int = Depends(get_current_user_id),
     session_id: str = Form(None)
 ):
     """
@@ -313,7 +314,7 @@ Please handle this request using the most appropriate tool.
                 print(f"DEBUG: Error cleaning up temporary PDF file: {e}")
 
 @router.get("/chat/history")
-async def get_chat_history(user_id: int, session_id: str = None, limit: int = 50):
+async def get_chat_history(user_id: int = Depends(get_current_user_id), session_id: str = None, limit: int = 50):
     """
     Retrieve chat history for a specific user.
     If session_id is provided, returns only that session's history.
@@ -339,7 +340,7 @@ async def get_chat_history(user_id: int, session_id: str = None, limit: int = 50
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @router.get("/chat/sessions")
-async def get_user_sessions(user_id: int):
+async def get_user_sessions(user_id: int = Depends(get_current_user_id)):
     """
     Get all unique session IDs for a user.
     """
@@ -355,7 +356,7 @@ async def unified_agent_for_project(
     background_tasks: BackgroundTasks,
     project_id: str,
     user_instruction: str = Form(...),
-    user_id: int = Form(...),
+    user_id: int = Depends(get_current_user_id),
     session_id: str = Form(None),
     doc_id: str = Form(None)
 ):

@@ -1,12 +1,13 @@
 """
 Project management API endpoints for the Floor Plan Agent API
 """
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 from typing import Optional, List
 from modules.projects.service import project_service
 from modules.agent.workflow import agent_workflow
 from modules.database import db_manager
 from modules.session import session_manager, context_resolver
+from modules.auth.deps import get_current_user_id
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -14,7 +15,7 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 async def create_project(
     project_name: str = Form(...),
     description: str = Form(...),
-    user_id: int = Form(...),
+    user_id: int = Depends(get_current_user_id),
     files: List[UploadFile] = File(default=[])
 ):
     """
@@ -74,7 +75,7 @@ async def create_project(
 async def create_project_single_file(
     project_name: str = Form(...),
     description: str = Form(...),
-    user_id: int = Form(...),
+    user_id: int = Depends(get_current_user_id),
     file: UploadFile = File(None)
 ):
     """
@@ -127,7 +128,7 @@ async def create_project_single_file(
         raise HTTPException(status_code=500, detail=f"Project creation failed: {str(e)}")
 
 @router.get("/{project_id}")
-async def get_project(project_id: str, user_id: int = None):
+async def get_project(project_id: str, user_id: int = None, current_user_id: int = Depends(get_current_user_id)):
     """Get project information by project ID"""
     try:
         project = project_service.get_project(project_id)
@@ -138,6 +139,9 @@ async def get_project(project_id: str, user_id: int = None):
         # If user_id is provided, try to find an existing session for this project
         session_id = None
         if user_id is not None:
+            # Only allow requesting sessions for self
+            if user_id != current_user_id:
+                raise HTTPException(status_code=403, detail="Access denied to requested user's project session")
             session_id = db_manager.get_project_session(user_id, project_id)
         
         # If no existing session found, create a new one
@@ -152,11 +156,13 @@ async def get_project(project_id: str, user_id: int = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/user/{user_id}")
-async def get_user_projects(user_id: int):
+async def get_user_projects(user_id: int, current_user_id: int = Depends(get_current_user_id)):
     """
     Get all projects for a specific user
     """
     try:
+        if user_id != current_user_id:
+            raise HTTPException(status_code=403, detail="Access denied to requested user's projects")
         projects = project_service.get_user_projects(user_id)
         return {"user_id": user_id, "projects": projects}
         
@@ -166,7 +172,7 @@ async def get_user_projects(user_id: int):
 @router.post("/{project_id}/upload-documents")
 async def add_documents_to_project(
     project_id: str,
-    user_id: int = Form(...),
+    user_id: int = Depends(get_current_user_id),
     files: List[UploadFile] = File(...)
 ):
     """
@@ -205,7 +211,7 @@ async def add_documents_to_project(
 @router.post("/{project_id}/share")
 async def share_project(
     project_id: str,
-    inviter_id: int = Form(...),
+    inviter_id: int = Depends(get_current_user_id),
     invitee_email: str = Form(...),
     role: str = Form("member")
 ):
@@ -220,7 +226,7 @@ async def share_project(
 @router.post("/invitations/{invitation_id}/respond")
 async def respond_to_invitation(
     invitation_id: int,
-    user_id: int = Form(...),
+    user_id: int = Depends(get_current_user_id),
     accept: bool = Form(...)
 ):
     """Accept or reject a project invitation"""
@@ -232,9 +238,11 @@ async def respond_to_invitation(
         raise HTTPException(status_code=500, detail=f"Failed to respond to invitation: {str(e)}")
 
 @router.get("/invitations")
-async def list_invitations(user_id: int, status: Optional[str] = None):
+async def list_invitations(user_id: int, status: Optional[str] = None, current_user_id: int = Depends(get_current_user_id)):
     """List invitations for a user"""
     try:
+        if user_id != current_user_id:
+            raise HTTPException(status_code=403, detail="Access denied to requested user's invitations")
         return project_service.list_user_invitations(user_id, status)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load invitations: {str(e)}")
@@ -242,7 +250,7 @@ async def list_invitations(user_id: int, status: Optional[str] = None):
 @router.put("/{project_id}")
 async def update_project(
     project_id: str,
-    user_id: int = Form(...),
+    user_id: int = Depends(get_current_user_id),
     project_name: Optional[str] = Form(None),
     description: Optional[str] = Form(None)
 ):
@@ -269,7 +277,7 @@ async def update_project(
         raise HTTPException(status_code=500, detail=f"Project update failed: {str(e)}")
 
 @router.get("/{project_id}/validate-access/{user_id}")
-async def validate_project_access(project_id: str, user_id: int):
+async def validate_project_access(project_id: str, user_id: int, current_user_id: int = Depends(get_current_user_id)):
     """
     Check if a user has access to a project
     """
@@ -285,7 +293,7 @@ async def validate_project_access(project_id: str, user_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/{project_id}")
-async def delete_project(project_id: str, user_id: int = Form(...), delete_shared_documents: bool = Form(True)):
+async def delete_project(project_id: str, user_id: int = Depends(get_current_user_id), delete_shared_documents: bool = Form(True)):
     """
     Delete a project and all its associated documents
     
@@ -309,11 +317,13 @@ async def delete_project(project_id: str, user_id: int = Form(...), delete_share
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/user/{user_id}")
-async def delete_user_projects(user_id: int):
+async def delete_user_projects(user_id: int, current_user_id: int = Depends(get_current_user_id)):
     """
     Delete all projects for a specific user
     """
     try:
+        if user_id != current_user_id:
+            raise HTTPException(status_code=403, detail="Access denied to requested user's projects")
         result = project_service.delete_user_projects(user_id)
         return result
         
