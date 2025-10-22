@@ -6,10 +6,10 @@ import uuid
 import io
 from typing import List, Dict, Any
 from pypdf import PdfReader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain.docstore.document import Document
+from langchain_core.documents import Document
 
 from modules.config.settings import settings
 from modules.database.models import db_manager
