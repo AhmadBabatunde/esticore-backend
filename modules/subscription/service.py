@@ -50,8 +50,11 @@ class SubscriptionService:
 
         normalized = interval.strip().lower()
         valid_values = {
-            SubscriptionInterval.MONTHLY.value: SubscriptionInterval.MONTHLY.value,
+            SubscriptionInterval.QUARTERLY.value: SubscriptionInterval.QUARTERLY.value,
             SubscriptionInterval.ANNUAL.value: SubscriptionInterval.ANNUAL.value,
+            "month": SubscriptionInterval.QUARTERLY.value,
+            "monthly": SubscriptionInterval.QUARTERLY.value,
+            "quarter": SubscriptionInterval.QUARTERLY.value,
         }
 
         if normalized not in valid_values:
@@ -60,18 +63,25 @@ class SubscriptionService:
         return valid_values[normalized]
 
     @staticmethod
-    def _from_stripe_interval(interval: Optional[str]) -> Optional[str]:
+    def _from_stripe_interval(interval: Optional[str], interval_count: Optional[int] = None) -> Optional[str]:
         """Convert Stripe interval values to internal representations."""
 
         if interval is None:
             return None
 
-        mapping = {
-            'month': SubscriptionInterval.MONTHLY.value,
-            'year': SubscriptionInterval.ANNUAL.value,
-        }
+        if interval == 'month':
+            if interval_count == 3:
+                return SubscriptionInterval.QUARTERLY.value
+            if interval_count == 1:
+                return SubscriptionInterval.QUARTERLY.value  # Legacy monthly treated as quarterly
 
-        return mapping.get(interval, interval)
+        if interval == 'year':
+            return SubscriptionInterval.ANNUAL.value
+
+        if interval in {'quarter', 'quarterly'}:
+            return SubscriptionInterval.QUARTERLY.value
+
+        return interval
     
     def get_available_plans(self) -> Dict[str, Any]:
         """Get all available subscription plans"""
@@ -155,11 +165,13 @@ class SubscriptionService:
             if normalized_interval == SubscriptionInterval.ANNUAL.value:
                 price_amount = int(plan.price_annual * 100)  # Convert to cents
                 stripe_interval = "year"
+                interval_count = 1
                 interval_display = "annual"
             else:
-                price_amount = int(plan.price_monthly * 100)
+                price_amount = int(plan.price_quarterly * 100)
                 stripe_interval = "month"
-                interval_display = "monthly"
+                interval_count = 3
+                interval_display = "quarterly"
 
             # Create Stripe checkout session
             checkout_session = stripe.checkout.Session.create(
@@ -175,6 +187,7 @@ class SubscriptionService:
                         'unit_amount': price_amount,
                         'recurring': {
                             'interval': stripe_interval,
+                            'interval_count': interval_count,
                         },
                     },
                     'quantity': 1,
@@ -278,13 +291,14 @@ class SubscriptionService:
         current_period_end = self._to_datetime(subscription.get('current_period_end'))
         status = subscription.get('status', db_subscription.status)
         cancel_at_period_end = subscription.get('cancel_at_period_end', False)
-        interval = (
+        plan_info = (
             subscription.get('items', {})
             .get('data', [{}])[0]
             .get('plan', {})
-            .get('interval', db_subscription.interval)
         )
-        interval = self._from_stripe_interval(interval) or db_subscription.interval
+        interval = plan_info.get('interval', db_subscription.interval)
+        interval_count = plan_info.get('interval_count')
+        interval = self._from_stripe_interval(interval, interval_count) or db_subscription.interval
 
         self.db.update_user_subscription(
             db_subscription.id,

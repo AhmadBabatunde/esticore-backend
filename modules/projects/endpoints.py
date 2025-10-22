@@ -61,10 +61,21 @@ async def create_project(
         session_id = session_manager.get_or_create_session(user_id, context_type, context_id)
         # ------------------------
         
-        # Add the new, context-aware session_id to the response
-        result["session_id"] = session_id
-        
-        return result
+    # Add the new, context-aware session_id to the response
+    result["session_id"] = session_id
+
+    db_manager.add_recently_viewed_project(user_id, result["project_id"])
+    db_manager.log_user_activity(
+        user_id,
+        "project_created",
+        {
+            "project_id": result["project_id"],
+            "project_name": project_name,
+            "documents": len(result.get("documents") or []),
+        }
+    )
+
+    return result
         
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -117,10 +128,21 @@ async def create_project_single_file(
         context_type, context_id = context_resolver.resolve_context({'project_id': result["project_id"]})
         session_id = session_manager.get_or_create_session(user_id, context_type, context_id)
         
-        # Add session_id to the response
-        result["session_id"] = session_id
-        
-        return result
+    # Add session_id to the response
+    result["session_id"] = session_id
+
+    db_manager.add_recently_viewed_project(user_id, result["project_id"])
+    db_manager.log_user_activity(
+        user_id,
+        "project_created",
+        {
+            "project_id": result["project_id"],
+            "project_name": project_name,
+            "documents": 1 if result.get("documents") else 0,
+        }
+    )
+
+    return result
         
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -149,7 +171,17 @@ async def get_project(project_id: str, user_id: int = None, current_user_id: int
             session_id = agent_workflow.get_or_create_chat_session()
             
         project["session_id"] = session_id
-        
+
+        db_manager.add_recently_viewed_project(current_user_id, project_id)
+        db_manager.log_user_activity(
+            current_user_id,
+            "project_viewed",
+            {
+                "project_id": project_id,
+                "project_name": project.get("name"),
+            }
+        )
+
         return project
         
     except Exception as e:
@@ -165,7 +197,17 @@ async def get_user_projects(user_id: int, current_user_id: int = Depends(get_cur
             raise HTTPException(status_code=403, detail="Access denied to requested user's projects")
         projects = project_service.get_user_projects(user_id)
         return {"user_id": user_id, "projects": projects}
-        
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/shared")
+async def get_shared_projects(user_id: int = Depends(get_current_user_id)):
+    """Get projects shared with the authenticated user"""
+    try:
+        projects = project_service.get_shared_projects(user_id)
+        return {"user_id": user_id, "projects": projects}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -198,9 +240,19 @@ async def add_documents_to_project(
         result = project_service.add_documents_to_project(
             project_id=project_id,
             file_contents=file_contents,
-            filenames=filenames
+            filenames=filenames,
+            user_id=user_id
         )
-        
+
+        db_manager.log_user_activity(
+            user_id,
+            "project_documents_uploaded",
+            {
+                "project_id": project_id,
+                "files": [file.filename for file in valid_files],
+            }
+        )
+
         return result
         
     except ValueError as e:
@@ -304,8 +356,17 @@ async def delete_project(project_id: str, user_id: int = Depends(get_current_use
     """
     try:
         result = project_service.delete_project(project_id, user_id, delete_shared_documents)
+
+        db_manager.log_user_activity(
+            user_id,
+            "project_deleted",
+            {
+                "project_id": project_id,
+                "delete_shared_documents": delete_shared_documents,
+            }
+        )
         return result
-        
+
     except ValueError as e:
         if "not found" in str(e).lower():
             raise HTTPException(status_code=404, detail=str(e))

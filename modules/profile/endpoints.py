@@ -38,3 +38,9 @@ async def delete_profile_image(user_id: int = Depends(get_current_user_id)):
 async def get_recently_viewed_projects(user_id: int = Depends(get_current_user_id)):
     """Get user's recently viewed projects"""
     return profile_service.get_recently_viewed_projects(user_id)
+
+
+@router.get("/activities")
+async def get_user_activities(limit: int = 50, user_id: int = Depends(get_current_user_id)):
+    """Get user's recent activity log"""
+    return profile_service.get_user_activities(user_id, limit)

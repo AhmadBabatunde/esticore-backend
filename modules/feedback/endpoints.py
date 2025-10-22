@@ -39,4 +39,4 @@ async def get_user_feedback(
 @router.get("/stats")
 async def get_feedback_stats():
     """Get feedback statistics (public endpoint)"""
-    return feedback_service.get_feedback_statistics()
+    raise HTTPException(status_code=403, detail="Access to feedback statistics is restricted")

@@ -225,12 +225,12 @@ class ProjectService:
             try:
                 owner_user = self.db.get_user_by_id(project.user_id)
                 if owner_user:
-                        owner = {
-                            "id": owner_user.id,
-                            "firstname": owner_user.firstname,
-                            "lastname": owner_user.lastname,
-                            "profile_image": getattr(owner_user, 'profile_image', None)
-                        }
+                    owner = {
+                        "id": owner_user.id,
+                        "firstname": owner_user.firstname,
+                        "lastname": owner_user.lastname,
+                        "profile_image": getattr(owner_user, 'profile_image', None),
+                    }
             except Exception:
                 owner = None
 
@@ -243,7 +243,7 @@ class ProjectService:
                 "documents": document_info if document_info else None,
                 "created_at": project.created_at,
                 "updated_at": project.updated_at,
-                "access": "owner"
+                "access": "owner",
             })
 
         for shared in shared_projects:
@@ -279,12 +279,79 @@ class ProjectService:
             })
 
         return result
+
+    def get_shared_projects(self, user_id: int) -> List[Dict[str, Any]]:
+        """Get projects shared with the specified user"""
+        shared_projects = self.db.get_shared_projects_for_user(user_id)
+        result: List[Dict[str, Any]] = []
+
+        for shared in shared_projects:
+            project = shared["project"]
+            role = shared.get("role", "member")
+
+            documents = self.db.get_project_documents(project.project_id)
+            document_info = []
+
+            for doc in documents:
+                document_info.append({
+                    "doc_id": doc.doc_id,
+                    "filename": doc.filename,
+                    "pages": doc.pages,
+                    "status": doc.status,
+                    "file_id": getattr(doc, 'file_id', None),
+                    "storage_type": "database" if getattr(doc, 'file_id', None) else "filesystem",
+                })
+
+            owner = None
+            try:
+                owner_user = self.db.get_user_by_id(project.user_id)
+                if owner_user:
+                    owner = {
+                        "id": owner_user.id,
+                        "firstname": owner_user.firstname,
+                        "lastname": owner_user.lastname,
+                        "profile_image": getattr(owner_user, 'profile_image', None),
+                    }
+            except Exception:
+                owner = None
+
+            result.append({
+                "project_id": project.project_id,
+                "name": project.name,
+                "description": project.description,
+                "user_id": project.user_id,
+                "owner": owner,
+                "documents": document_info if document_info else None,
+                "created_at": project.created_at,
+                "updated_at": project.updated_at,
+                "access": "shared",
+                "role": role,
+            })
+
+        return result
     
-    def add_document_to_project(self, project_id: str, file_content: bytes, filename: str) -> Dict[str, Any]:
+    def add_document_to_project(
+        self,
+        project_id: str,
+        file_content: bytes,
+        filename: str,
+        user_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Add a PDF document to an existing project (backward compatibility)"""
-        return self.add_documents_to_project(project_id, [file_content], [filename])
-    
-    def add_documents_to_project(self, project_id: str, file_contents: List[bytes], filenames: List[str]) -> Dict[str, Any]:
+        return self.add_documents_to_project(
+            project_id,
+            [file_content],
+            [filename],
+            user_id=user_id,
+        )
+
+    def add_documents_to_project(
+        self,
+        project_id: str,
+        file_contents: List[bytes],
+        filenames: List[str],
+        user_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Add one or more PDF documents to an existing project"""
         # Check if project exists
         project = self.db.get_project_by_id(project_id)

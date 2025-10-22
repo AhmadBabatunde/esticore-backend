@@ -37,14 +37,9 @@ async def admin_register(
     return admin_service.admin_register(username, email, password, confirm_password, is_super_admin)
 
 @router.get("/users", dependencies=[Depends(verify_admin_token)])
-async def get_all_users(
-    page: int = 1,
-    limit: int = 20,
-    status: Optional[UserStatus] = None,
-    search: Optional[str] = None
-):
-    """Get all users with pagination and filtering"""
-    return admin_service.get_all_users(page, limit, status, search)
+async def get_all_users(status: Optional[UserStatus] = None, search: Optional[str] = None):
+    """Get all users with optional filtering"""
+    return admin_service.get_all_users(status=status, search=search)
 
 @router.post("/users", dependencies=[Depends(verify_admin_token)])
 async def create_user(
@@ -78,6 +73,15 @@ async def update_user_storage(user_id: int, file_size_mb: float = Form(...)):
     """Update user storage usage (called when files are uploaded)"""
     return admin_service.update_user_storage(user_id, file_size_mb)
 
+@router.post("/users/{user_id}/subscription/switch", dependencies=[Depends(verify_admin_token)])
+async def switch_user_subscription(
+    user_id: int,
+    plan_id: int = Form(...),
+    interval: SubscriptionInterval = Form(SubscriptionInterval.QUARTERLY)
+):
+    """Switch a user's subscription plan without payment processing"""
+    return admin_service.switch_user_subscription_plan(user_id, plan_id, interval)
+
 @router.get("/subscription/plans", dependencies=[Depends(verify_admin_token)])
 async def get_all_subscription_plans():
     """Get all subscription plans"""
@@ -87,7 +91,7 @@ async def get_all_subscription_plans():
 async def create_subscription_plan(
     name: str = Form(...),
     description: str = Form(...),
-    price_monthly: float = Form(...),
+    price_quarterly: float = Form(...),
     price_annual: float = Form(...),
     storage_gb: int = Form(...),
     project_limit: int = Form(...),
@@ -102,7 +106,7 @@ async def create_subscription_plan(
     print(features)
 
     return admin_service.create_subscription_plan(
-        name, description, price_monthly, price_annual, storage_gb,
+        name, description, price_quarterly, price_annual, storage_gb,
         project_limit, user_limit, action_limit, features,
         has_free_trial, trial_days
     )
@@ -111,7 +115,7 @@ async def update_subscription_plan(
     plan_id: int,
     name: Optional[str] = Form(None),
     description: Optional[str] = Form(None),
-    price_monthly: Optional[float] = Form(None),
+    price_quarterly: Optional[float] = Form(None),
     price_annual: Optional[float] = Form(None),
     storage_gb: Optional[int] = Form(None),
     project_limit: Optional[int] = Form(None),
@@ -123,7 +127,7 @@ async def update_subscription_plan(
     """Update a subscription plan (partial update)"""
     # No need for manual JSON parsing for features list
     return admin_service.update_subscription_plan(
-        plan_id, name, description, price_monthly, price_annual,
+        plan_id, name, description, price_quarterly, price_annual,
         storage_gb, project_limit, user_limit, action_limit,
         features, is_active  # Pass the list directly
     )
