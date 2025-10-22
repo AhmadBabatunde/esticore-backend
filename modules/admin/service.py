@@ -2,6 +2,7 @@
 Admin services for the Floor Plan Agent API
 """
 import hashlib
+import json
 import jwt
 from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
 import secrets
@@ -96,20 +97,61 @@ class AdminService:
         except InvalidTokenError:
             return False
     
-    def get_all_users(self, page: int, limit: int, status: Optional[UserStatus], search: Optional[str]) -> Dict[str, Any]:
-        """Get all users with pagination and filtering"""
+    def get_all_users(self, status: Optional[UserStatus] = None, search: Optional[str] = None) -> Dict[str, Any]:
+        """Get all users with optional filtering and subscription details"""
         try:
-            users = self.db.get_all_users_paginated(page, limit, status, search)
-            total_users = self.db.get_total_users_count(status, search)
-            
+            status_value = status.value if status else None
+            users = self.db.get_all_users_with_filters(status_value, search)
+
+            user_entries: List[Dict[str, Any]] = []
+
+            for user in users:
+                subscription = self.db.get_user_subscription(user.id)
+                subscription_info = None
+
+                if subscription:
+                    plan = self.db.get_subscription_plan_by_id(subscription.plan_id)
+                    plan_features = plan.features if plan else None
+                    if isinstance(plan_features, str):
+                        try:
+                            plan_features = json.loads(plan_features)
+                        except json.JSONDecodeError:
+                            pass
+                    subscription_info = {
+                        "id": subscription.id,
+                        "status": subscription.status,
+                        "interval": subscription.interval,
+                        "auto_renew": subscription.auto_renew,
+                        "current_period_start": subscription.current_period_start,
+                        "current_period_end": subscription.current_period_end,
+                        "plan": {
+                            "id": plan.id if plan else None,
+                            "name": plan.name if plan else None,
+                            "price_quarterly": plan.price_quarterly if plan else None,
+                            "price_annual": plan.price_annual if plan else None,
+                            "storage_gb": plan.storage_gb if plan else None,
+                            "project_limit": plan.project_limit if plan else None,
+                            "action_limit": plan.action_limit if plan else None,
+                            "features": plan_features,
+                        } if plan else None,
+                    }
+
+                user_entries.append({
+                    "id": user.id,
+                    "firstname": user.firstname,
+                    "lastname": user.lastname,
+                    "email": user.email,
+                    "is_verified": user.is_verified,
+                    "is_active": user.is_active,
+                    "role": user.role,
+                    "last_login": user.last_login,
+                    "created_at": user.created_at,
+                    "subscription": subscription_info,
+                })
+
             return {
-                "users": users,
-                "pagination": {
-                    "page": page,
-                    "limit": limit,
-                    "total": total_users,
-                    "pages": (total_users + limit - 1) // limit
-                }
+                "users": user_entries,
+                "count": len(user_entries)
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error fetching users: {str(e)}")
@@ -124,17 +166,30 @@ class AdminService:
             
             # Delete user files from AWS (implement this in storage service)
             from modules.storage.service import storage_service
+            from modules.projects.service import project_service
+
             storage_service.delete_user_files(user_id)
-            
+
+            project_cleanup: Optional[Dict[str, Any]] = None
+            try:
+                project_cleanup = project_service.delete_user_projects(user_id)
+            except Exception as cleanup_error:
+                # Continue with account deletion but surface cleanup issues to the caller
+                project_cleanup = {
+                    "message": "Failed to delete one or more projects",
+                    "error": str(cleanup_error),
+                }
+
             # Delete user from database
             success = self.db.delete_user(user_id)
             if not success:
                 raise HTTPException(status_code=500, detail="Failed to delete user")
-            
+
             return {
                 "message": "User deleted successfully",
                 "user_id": user_id,
-                "email": user.email
+                "email": user.email,
+                "project_cleanup": project_cleanup,
             }
         except HTTPException:
             raise
@@ -147,7 +202,7 @@ class AdminService:
             success = self.db.update_user_status(user_id, is_active)
             if not success:
                 raise HTTPException(status_code=404, detail="User not found")
-            
+
             status = "active" if is_active else "inactive"
             return {
                 "message": f"User status updated to {status}",
@@ -158,6 +213,99 @@ class AdminService:
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error updating user status: {str(e)}")
+
+    def switch_user_subscription_plan(
+        self,
+        user_id: int,
+        plan_id: int,
+        interval: SubscriptionInterval = SubscriptionInterval.QUARTERLY,
+    ) -> Dict[str, Any]:
+        """Switch a user's subscription plan without payment processing."""
+
+        try:
+            user = self.db.get_user_by_id(user_id)
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            plan = self.db.get_subscription_plan_by_id(plan_id)
+            if not plan:
+                raise HTTPException(status_code=404, detail="Subscription plan not found")
+
+            normalized_interval = interval.value if isinstance(interval, SubscriptionInterval) else SubscriptionInterval(interval).value
+
+            now = datetime.utcnow()
+            if normalized_interval == SubscriptionInterval.ANNUAL.value:
+                period_end = now + timedelta(days=365)
+            else:
+                period_end = now + timedelta(days=90)
+
+            existing_subscription = self.db.get_user_subscription(user_id)
+
+            if existing_subscription:
+                self.db.update_user_subscription(
+                    existing_subscription.id,
+                    plan_id=plan_id,
+                    interval=normalized_interval,
+                    current_period_start=now,
+                    current_period_end=period_end,
+                    status='active',
+                    is_active=True,
+                    auto_renew=existing_subscription.auto_renew,
+                )
+                subscription_id = existing_subscription.id
+            else:
+                subscription_id = self.db.create_user_subscription(
+                    user_id,
+                    plan_id,
+                    interval=normalized_interval,
+                    current_period_start=now,
+                    current_period_end=period_end,
+                    status='active',
+                    auto_renew=True,
+                    is_active=True,
+                )
+
+            # Ensure storage record exists for the user
+            if not self.db.get_user_storage(user_id):
+                self.db.create_user_storage(user_id)
+
+            updated_subscription = self.db.get_user_subscription(user_id)
+
+            self.db.log_user_activity(
+                user_id,
+                "subscription_updated_by_admin",
+                {
+                    "plan_id": plan_id,
+                    "interval": normalized_interval,
+                    "subscription_id": subscription_id,
+                },
+            )
+
+            plan_features = plan.features
+            if isinstance(plan_features, str):
+                try:
+                    plan_features = json.loads(plan_features)
+                except json.JSONDecodeError:
+                    pass
+
+            return {
+                "message": "User subscription updated successfully",
+                "user_id": user_id,
+                "subscription_id": subscription_id,
+                "interval": normalized_interval,
+                "plan": {
+                    "id": plan.id,
+                    "name": plan.name,
+                    "price_quarterly": plan.price_quarterly,
+                    "price_annual": plan.price_annual,
+                    "features": plan_features,
+                },
+                "subscription": updated_subscription,
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error updating subscription: {str(e)}")
 
     def create_user_account(
         self,
@@ -205,52 +353,68 @@ class AdminService:
         """Get user storage usage statistics"""
         try:
             user_storage = self.db.get_user_storage(user_id)
+            if not user_storage:
+                raise HTTPException(status_code=404, detail="User storage record not found")
+
             user_subscription = self.db.get_user_subscription(user_id)
-            
-            if not user_storage or not user_subscription:
-                raise HTTPException(status_code=404, detail="User storage or subscription not found")
-            
-            storage_limit_mb = user_subscription.plan.storage_gb * 1024
-            used_percentage = (user_storage.used_storage_mb / storage_limit_mb) * 100
-            
+            if not user_subscription:
+                raise HTTPException(status_code=404, detail="User has no active subscription")
+
+            plan = self.db.get_subscription_plan_by_id(user_subscription.plan_id)
+            if not plan:
+                raise HTTPException(status_code=404, detail="Subscription plan not found")
+
+            storage_limit_mb = plan.storage_gb * 1024
+            used_percentage = (
+                (user_storage.used_storage_mb / storage_limit_mb) * 100
+                if storage_limit_mb > 0 else 0.0
+            )
+
             return {
                 "user_id": user_id,
-                "used_storage_mb": user_storage.used_storage_mb,
+                "used_storage_mb": round(user_storage.used_storage_mb, 2),
                 "storage_limit_mb": storage_limit_mb,
-                "available_storage_mb": storage_limit_mb - user_storage.used_storage_mb,
+                "available_storage_mb": round(storage_limit_mb - user_storage.used_storage_mb, 2),
                 "used_percentage": round(used_percentage, 2),
                 "last_updated": user_storage.last_updated
             }
         except HTTPException:
             raise
         except Exception as e:
-            print(f"Error fetching storage stats: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Error fetching storage stats:")
-    
+            raise HTTPException(status_code=500, detail=f"Error fetching storage stats: {str(e)}")
+
     def update_user_storage(self, user_id: int, file_size_mb: float) -> Dict[str, Any]:
         """Update user storage usage"""
         try:
             # Check if user has sufficient storage
-            user_storage = self.db.get_user_storage(user_id)
             user_subscription = self.db.get_user_subscription(user_id)
-            
+
             if not user_subscription:
                 raise HTTPException(status_code=400, detail="User has no active subscription")
-            
-            storage_limit_mb = user_subscription.plan.storage_gb * 1024
+
+            plan = self.db.get_subscription_plan_by_id(user_subscription.plan_id)
+            if not plan:
+                raise HTTPException(status_code=404, detail="Subscription plan not found")
+
+            user_storage = self.db.get_user_storage(user_id)
+            if not user_storage:
+                self.db.create_user_storage(user_id)
+                user_storage = self.db.get_user_storage(user_id)
+
+            storage_limit_mb = plan.storage_gb * 1024
             new_usage = user_storage.used_storage_mb + file_size_mb
-            
+
             if new_usage > storage_limit_mb:
                 raise HTTPException(
-                    status_code=400, 
+                    status_code=400,
                     detail=f"Storage limit exceeded. Available: {storage_limit_mb - user_storage.used_storage_mb}MB, Required: {file_size_mb}MB"
                 )
-            
+
             # Update storage
             success = self.db.update_user_storage(user_id, new_usage)
             if not success:
                 raise HTTPException(status_code=500, detail="Failed to update storage")
-            
+
             return {
                 "message": "Storage updated successfully",
                 "user_id": user_id,
@@ -265,8 +429,6 @@ class AdminService:
     def get_all_subscription_plans(self) -> Dict[str, Any]:
         """Get all subscription plans"""
         try:
-
-            sth = self.db.debug_plan_features(8)
             plans = self.db.get_all_subscription_plans()
             return {
                 "plans": plans,
@@ -275,7 +437,7 @@ class AdminService:
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error fetching subscription plans: {str(e)}")
     
-    def create_subscription_plan(self, name: str, description: str, price_monthly: float, 
+    def create_subscription_plan(self, name: str, description: str, price_quarterly: float,
                                price_annual: float, storage_gb: int, project_limit: int,
                                user_limit: int, action_limit: int, features: List[str],
                                has_free_trial: bool, trial_days: int) -> Dict[str, Any]:
@@ -283,7 +445,7 @@ class AdminService:
         
         try:
             plan_id = self.db.create_subscription_plan(
-                name, description, price_monthly, price_annual, storage_gb,
+                name, description, price_quarterly, price_annual, storage_gb,
                 project_limit, user_limit, action_limit, features,
                 has_free_trial, trial_days
             )
@@ -297,7 +459,7 @@ class AdminService:
             raise HTTPException(status_code=500, detail=f"Error creating subscription plan: {str(e)}")
 
     def update_subscription_plan(self, plan_id: int, name: Optional[str] = None,
-                           description: Optional[str] = None, price_monthly: Optional[float] = None,
+                           description: Optional[str] = None, price_quarterly: Optional[float] = None,
                            price_annual: Optional[float] = None, storage_gb: Optional[int] = None,
                            project_limit: Optional[int] = None, user_limit: Optional[int] = None,
                            action_limit: Optional[int] = None, features: Optional[List[str]] = None,
@@ -315,8 +477,8 @@ class AdminService:
                 update_data['name'] = name
             if description is not None:
                 update_data['description'] = description
-            if price_monthly is not None:
-                update_data['price_monthly'] = price_monthly
+            if price_quarterly is not None:
+                update_data['price_quarterly'] = price_quarterly
             if price_annual is not None:
                 update_data['price_annual'] = price_annual
             if storage_gb is not None:

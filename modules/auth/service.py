@@ -587,6 +587,8 @@ class AuthService:
                 }
 
             if normalized_purpose == "login":
+                self.db.update_user_last_login(user.id)
+                self.db.log_user_activity(user.id, "login", {"email": user.email})
                 access_token = self.generate_token(user.id, user.email)
 
                 return {

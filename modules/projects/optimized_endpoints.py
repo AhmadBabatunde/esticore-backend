@@ -188,7 +188,8 @@ async def upload_documents_chunked(
                 result = project_service.add_documents_to_project(
                     project_id=project_id,
                     file_contents=[file_content],
-                    filenames=[file.filename]
+                    filenames=[file.filename],
+                    user_id=user_id,
                 )
                 
                 results.append({

@@ -3,8 +3,9 @@ PDF processing and document management for the Floor Plan Agent API
 """
 import os
 import uuid
+from datetime import datetime
 import io
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from pypdf import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
@@ -21,7 +22,69 @@ class PDFProcessor:
         self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=200)
         self.embeddings = OpenAIEmbeddings(api_key=settings.OPENAI_API_KEY)
         self.use_database_storage = settings.USE_RDS and settings.IS_POSTGRES
-    
+
+    def _get_user_storage_limit_mb(self, user_id: int) -> float:
+        """Calculate storage limit in megabytes for a user."""
+        subscription = db_manager.get_user_subscription(user_id)
+        if subscription:
+            plan = db_manager.get_subscription_plan_by_id(subscription.plan_id)
+            if plan:
+                return plan.storage_gb * 1024
+
+        user = db_manager.get_user_by_id(user_id)
+        created_at = getattr(user, "created_at", None) if user else None
+        if created_at:
+            try:
+                timestamp = created_at
+                if isinstance(timestamp, str):
+                    timestamp = datetime.fromisoformat(timestamp)
+                if timestamp and (datetime.now() - timestamp).days <= 30:
+                    return 15 * 1024
+            except Exception:
+                pass
+
+        return 100
+
+    def _calculate_document_size_mb(self, document: Any) -> float:
+        """Estimate the size of a stored document in megabytes."""
+        if not document:
+            return 0.0
+
+        size_bytes = 0
+
+        if self.use_database_storage and getattr(document, "file_id", None):
+            try:
+                file_record = db_manager.get_file(document.file_id)
+                if file_record and getattr(file_record, "file_size", None):
+                    size_bytes = file_record.file_size
+            except Exception:
+                size_bytes = 0
+        else:
+            try:
+                pdf_path = os.path.join(settings.DOCS_DIR, f"{document.doc_id}.pdf")
+                if os.path.exists(pdf_path):
+                    size_bytes = os.path.getsize(pdf_path)
+            except Exception:
+                size_bytes = 0
+
+        return size_bytes / (1024 * 1024) if size_bytes else 0.0
+
+    def _decrement_user_storage(self, user_id: int, file_size_mb: float) -> None:
+        """Reduce a user's recorded storage usage after deletions."""
+        if file_size_mb <= 0:
+            return
+
+        try:
+            storage = db_manager.get_user_storage(user_id)
+            if not storage:
+                return
+
+            new_usage = max(0.0, storage.used_storage_mb - file_size_mb)
+            db_manager.update_user_storage(user_id, new_usage)
+        except Exception:
+            # Avoid raising during cleanup routines
+            pass
+
     def pdf_to_documents(self, pdf_source, doc_id: str) -> List[Document]:
         """Convert PDF to document chunks for indexing
         
@@ -143,11 +206,13 @@ class PDFProcessor:
             document = db_manager.get_document_by_doc_id(doc_id)
             if not document:
                 return False
-            
+
+            file_size_mb = self._calculate_document_size_mb(document)
+
             if self.use_database_storage:
                 # Delete from database storage
                 success = True
-                
+
                 # Delete vector chunks
                 try:
                     db_manager.delete_vector_chunks(doc_id)
@@ -166,12 +231,24 @@ class PDFProcessor:
                     db_manager.delete_document(doc_id)
                 except:
                     success = False
-                
+
+                if success:
+                    self._decrement_user_storage(document.user_id, file_size_mb)
+                    db_manager.log_user_activity(
+                        document.user_id,
+                        "document_deleted",
+                        {
+                            "doc_id": doc_id,
+                            "filename": document.filename,
+                            "file_size_mb": round(file_size_mb, 2),
+                        },
+                    )
+
                 return success
             else:
                 # Delete from file storage (legacy)
                 return self.delete_document_files(doc_id)
-                
+
         except Exception as e:
             print(f"Error deleting document {doc_id}: {e}")
             return False
@@ -252,6 +329,19 @@ class PDFProcessor:
             raise ValueError("Please upload a PDF file")
         
         doc_id = uuid.uuid4().hex
+
+        file_size_mb = len(file_content) / (1024 * 1024)
+        user_storage = db_manager.get_user_storage(user_id)
+        if not user_storage:
+            db_manager.create_user_storage(user_id)
+            user_storage = db_manager.get_user_storage(user_id)
+
+        storage_limit_mb = self._get_user_storage_limit_mb(user_id)
+        if user_storage and user_storage.used_storage_mb + file_size_mb > storage_limit_mb:
+            available = storage_limit_mb - user_storage.used_storage_mb
+            raise ValueError(
+                f"Storage limit exceeded. Available: {max(0, available):.2f}MB, Required: {file_size_mb:.2f}MB"
+            )
         
         if self.use_database_storage:
             # Store file in database
@@ -318,9 +408,22 @@ class PDFProcessor:
                 n_chunks = self.index_pdf(doc_id, file_content)
             else:
                 n_chunks = self.index_pdf(doc_id, pdf_path)
-            
+
             # Update document with actual chunk count
             db_manager.update_document_chunks_indexed(doc_id, n_chunks)
+
+            latest_storage = db_manager.get_user_storage(user_id)
+            base_usage = latest_storage.used_storage_mb if latest_storage else 0
+            db_manager.update_user_storage(user_id, base_usage + file_size_mb)
+            db_manager.log_user_activity(
+                user_id,
+                "document_uploaded",
+                {
+                    "doc_id": doc_id,
+                    "filename": filename,
+                    "file_size_mb": round(file_size_mb, 2),
+                }
+            )
             
         except Exception as e:
             # Clean up on indexing failure
@@ -376,9 +479,16 @@ class PDFProcessor:
             raise FileNotFoundError("Document not found")
         
         if self.use_database_storage:
-            # For database storage, check if file exists in database
-            file_exists = document.file_id and db_manager.get_file(document.file_id) is not None
-            
+            # For database storage, include metadata from the file storage table
+            file_record = None
+            try:
+                if document.file_id:
+                    file_record = db_manager.get_file(document.file_id)
+            except Exception:
+                file_record = None
+
+            file_size_bytes = getattr(file_record, "file_size", None) if file_record else None
+
             return {
                 "doc_id": doc_id,
                 "filename": document.filename,
@@ -386,18 +496,34 @@ class PDFProcessor:
                 "pages": document.pages,
                 "chunks_indexed": document.chunks_indexed,
                 "status": document.status,
-                "storage_type": "database"
+                "storage_type": "database",
+                "file_exists": bool(file_record),
+                "file_size_bytes": file_size_bytes,
+                "user_id": document.user_id,
             }
         else:
-            # Legacy file storage - would need pdf_path and vector_path
-            # This is for backward compatibility with old Document structure
+            # Legacy file storage - derive filesystem paths for compatibility
+            pdf_path = os.path.join(settings.DOCS_DIR, f"{doc_id}.pdf")
+            vector_path = os.path.join(settings.VECTORS_DIR, doc_id)
+            file_size_bytes: Optional[int] = None
+
+            try:
+                if os.path.exists(pdf_path):
+                    file_size_bytes = os.path.getsize(pdf_path)
+            except Exception:
+                file_size_bytes = None
+
             return {
                 "doc_id": doc_id,
                 "filename": document.filename,
                 "pages": document.pages,
                 "chunks_indexed": document.chunks_indexed,
                 "status": document.status,
-                "storage_type": "filesystem"
+                "storage_type": "filesystem",
+                "pdf_path": pdf_path,
+                "vector_path": vector_path,
+                "file_size_bytes": file_size_bytes,
+                "user_id": document.user_id,
             }
     
     def list_documents(self, user_id: int = None) -> dict:
@@ -596,12 +722,14 @@ class PDFProcessor:
     def delete_document_files(self, doc_id: str) -> bool:
         """Delete both PDF and vector files for a document"""
         success = True
-        
+
         # Get document info from database
         document = db_manager.get_document_by_doc_id(doc_id)
         if not document:
             return False
-        
+
+        file_size_mb = self._calculate_document_size_mb(document)
+
         # Handle file deletion based on storage type
         if self.use_database_storage:
             # For database storage, files are stored in database, no filesystem cleanup needed
@@ -638,7 +766,19 @@ class PDFProcessor:
         except Exception as e:
             print(f"Error deleting document from database {doc_id}: {e}")
             success = False
-        
+
+        if success:
+            self._decrement_user_storage(document.user_id, file_size_mb)
+            db_manager.log_user_activity(
+                document.user_id,
+                "document_deleted",
+                {
+                    "doc_id": doc_id,
+                    "filename": document.filename,
+                    "file_size_mb": round(file_size_mb, 2),
+                },
+            )
+
         return success
 
 # Global PDF processor instance

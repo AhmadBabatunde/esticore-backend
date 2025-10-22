@@ -1,6 +1,7 @@
 """Subscription API endpoints for the Floor Plan Agent API."""
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from modules.admin.models import SubscriptionInterval
 from modules.auth.deps import get_current_user_id
 from modules.subscription.service import Subscription_Service
 
@@ -19,11 +20,12 @@ async def get_user_subscription(user_id: int = Depends(get_current_user_id)):
 @router.post("/create-checkout-session")
 async def create_checkout_session(
     plan_id: int = Form(...),
-    interval: str = Form(...),  # 'monthly' or 'annual'
+    interval: SubscriptionInterval = Form(...),  # 'quarterly' or 'annual'
     user_id: int = Depends(get_current_user_id)
 ):
     """Create Stripe checkout session"""
-    return Subscription_Service.create_checkout_session(user_id, plan_id, interval)
+    interval_value = interval.value if isinstance(interval, SubscriptionInterval) else interval
+    return Subscription_Service.create_checkout_session(user_id, plan_id, interval_value)
 
 @router.post("/webhook")
 async def stripe_webhook(request: Request):

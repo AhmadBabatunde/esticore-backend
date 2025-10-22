@@ -67,7 +67,17 @@ class StorageService:
             # Update user storage
             new_usage = user_storage.used_storage_mb + file_size_mb
             self.db.update_user_storage(user_id, new_usage)
-            
+
+            self.db.log_user_activity(
+                user_id,
+                "file_uploaded",
+                {
+                    "filename": file.filename,
+                    "file_size_mb": round(file_size_mb, 2),
+                    "project_id": project_id,
+                }
+            )
+
             return {
                 "message": "File uploaded successfully",
                 "filename": file.filename,
