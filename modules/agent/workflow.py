@@ -120,11 +120,12 @@ class AgentWorkflow:
         self.memory = SimpleMemory()
         self.session_manager = session_manager
         self.context_resolver = context_resolver
-        
-        self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, api_key=settings.OPENAI_API_KEY)
+
+        # Use model name from settings so it can be configured via environment variable OPENAI_MODEL
+        self.llm = ChatOpenAI(model=settings.OPENAI_MODEL, temperature=0.0, api_key=settings.OPENAI_API_KEY)
         self.agent = create_tool_calling_agent(self.llm, ALL_TOOLS, self._create_prompt())
         self.agent_executor = AgentExecutor(agent=self.agent, tools=ALL_TOOLS, verbose=True)
-        
+
         # Initialize LangGraph workflow
         self.workflow = self._create_workflow()
         self.compiled_graph = self.workflow.compile()
@@ -138,9 +139,8 @@ class AgentWorkflow:
 
 **1. HANDLE GREETINGS AND INTRODUCTIONS FIRST:**
 - If the user provides a simple greeting (e.g., "hello", "hi", "good morning"), you MUST respond conversationally.
-- Your response should be a friendly greeting followed by a brief, helpful summary of the document to get the conversation started.
-- To do this, call the `answer_question_with_suggestions` tool to provide a summary of this document."
-- Example: "Hello! I'm ready to help. This document appears to be a multi-story residential building plan. What can I help you with?"
+- Your response should be a friendly greeting followed by a brief."
+- Example: "Hello! I'm ready to help. . What can I help you with?"
 
 **2. DETERMINE THE USER'S CORE INTENT:**
 

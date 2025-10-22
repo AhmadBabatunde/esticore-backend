@@ -23,9 +23,7 @@ class UserStatus(str, Enum):
     SUSPENDED = "suspended"
 
 class SubscriptionInterval(str, Enum):
-    MONTHLY = "monthly"
     QUARTERLY = "quarterly"
-    BIANNUAL = "biannual"
     ANNUAL = "annual"
 
 class FeedbackType(str, Enum):
@@ -47,6 +45,8 @@ class User:
     created_at: Optional[datetime] = None
     is_active: bool = True
     profile_image: Optional[str] = None
+    role: str = "user"
+    last_login: Optional[datetime] = None
 
 @dataclass
 class AdminUser:
@@ -65,7 +65,7 @@ class SubscriptionPlan:
     id: Optional[int] = None
     name: str = ""
     description: str = ""
-    price_monthly: float = 0.0
+    price_quarterly: float = 0.0
     price_annual: float = 0.0
     storage_gb: int = 0
     project_limit: int = 0
@@ -88,7 +88,7 @@ class UserSubscription:
     current_period_start: Optional[datetime] = None
     current_period_end: Optional[datetime] = None
     status: str = "active"
-    interval: str = "monthly"
+    interval: str = "quarterly"
     auto_renew: bool = True
     is_active: bool = True
     created_at: Optional[datetime] = None
@@ -101,6 +101,15 @@ class UserStorage:
     user_id: int = 0
     used_storage_mb: int = 0
     last_updated: Optional[datetime] = None
+
+@dataclass
+class UserActivity:
+    """User activity log entry"""
+    id: Optional[int] = None
+    user_id: int = 0
+    action: str = ""
+    metadata: Optional[Dict[str, Any]] = None
+    created_at: Optional[datetime] = None
 
 @dataclass
 class Feedback:
@@ -145,6 +154,17 @@ class EmailVerificationToken:
     used_at: Optional[datetime] = None
 
 @dataclass
+class UserOTP:
+    """Generic user OTP data model"""
+    id: Optional[int] = None
+    user_id: int = 0
+    otp_code: str = ""
+    purpose: str = ""
+    expires_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    consumed_at: Optional[datetime] = None
+
+@dataclass
 class Document:
     """Document data model"""
     id: Optional[int] = None
@@ -157,6 +177,40 @@ class Document:
     user_id: int = 0  # Owner of the document
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+@dataclass
+class ProjectMember:
+    """Project membership data model"""
+    id: Optional[int] = None
+    project_id: str = ""
+    user_id: int = 0
+    role: str = "member"
+    created_at: Optional[datetime] = None
+
+@dataclass
+class ProjectInvitation:
+    """Project invitation data model"""
+    id: Optional[int] = None
+    project_id: str = ""
+    inviter_id: int = 0
+    invitee_id: Optional[int] = None
+    invitee_email: str = ""
+    role: str = "member"
+    status: str = "pending"
+    created_at: Optional[datetime] = None
+    responded_at: Optional[datetime] = None
+
+@dataclass
+class Notification:
+    """User notification data model"""
+    id: Optional[int] = None
+    user_id: int = 0
+    title: str = ""
+    message: str = ""
+    notification_type: str = "general"
+    metadata: Optional[Dict[str, Any]] = None
+    is_read: bool = False
+    created_at: Optional[datetime] = None
     
     def validate(self) -> bool:
         """Validate document data"""
@@ -351,7 +405,7 @@ class DatabaseManager:
     def __init__(self, db_name: str = None):
         self.db_name = db_name or settings.DATABASE_NAME
         self.use_rds = settings.USE_RDS
-        
+
         # Determine database type based on port
         self.is_postgres = settings.DB_PORT == 5432
         
@@ -384,7 +438,38 @@ class DatabaseManager:
                 }
         
         self.init_database()
-    
+
+    @staticmethod
+    def _map_user_row(row) -> Optional[User]:
+        """Convert a database row tuple to a ``User`` instance."""
+        if not row:
+            return None
+
+        role_index = 12 if len(row) > 12 else None
+        last_login_index = 13 if len(row) > 13 else None
+
+        role_value = row[role_index] if role_index is not None else None
+        last_login_value = row[last_login_index] if last_login_index is not None else None
+
+        profile_index = 11 if len(row) > 11 else None
+
+        return User(
+            id=row[0],
+            firstname=row[1],
+            lastname=row[2],
+            email=row[3],
+            password=row[4],
+            google_id=row[5],
+            is_verified=bool(row[6]),
+            verification_token=row[7],
+            verification_token_expires=row[8],
+            created_at=row[9],
+            is_active=bool(row[10]) if len(row) > 10 else True,
+            profile_image=row[profile_index] if profile_index is not None else None,
+            role=(role_value or "user"),
+            last_login=last_login_value,
+        )
+
     def get_connection(self):
         """Get database connection with retry logic and proper error handling"""
         if self.use_rds:
@@ -484,7 +569,11 @@ class DatabaseManager:
                     is_verified BOOLEAN DEFAULT FALSE,
                     verification_token VARCHAR(255),
                     verification_token_expires TIMESTAMP NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    profile_image TEXT,
+                    role VARCHAR(50) DEFAULT 'user',
+                    last_login TIMESTAMP NULL
                 )
             """)
             
@@ -559,7 +648,105 @@ class DatabaseManager:
             # Create indexes for project_documents
             cur.execute("CREATE INDEX IF NOT EXISTS idx_project_documents_project_id ON project_documents (project_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_project_documents_doc_id ON project_documents (doc_id)")
-            
+
+            # Create project_members table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS project_members(
+                    id SERIAL PRIMARY KEY,
+                    project_id VARCHAR(255) NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    role VARCHAR(50) DEFAULT 'member',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (project_id) REFERENCES projects (project_id) ON DELETE CASCADE,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    UNIQUE (project_id, user_id)
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members (user_id)")
+
+            # Create project_invitations table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS project_invitations(
+                    id SERIAL PRIMARY KEY,
+                    project_id VARCHAR(255) NOT NULL,
+                    inviter_id INTEGER NOT NULL,
+                    invitee_id INTEGER,
+                    invitee_email VARCHAR(255) NOT NULL,
+                    role VARCHAR(50) DEFAULT 'member',
+                    status VARCHAR(20) DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    responded_at TIMESTAMP,
+                    FOREIGN KEY (project_id) REFERENCES projects (project_id) ON DELETE CASCADE,
+                    FOREIGN KEY (inviter_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    FOREIGN KEY (invitee_id) REFERENCES userdata (id) ON DELETE SET NULL
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_project_invitations_invitee ON project_invitations (invitee_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_project_invitations_email ON project_invitations (invitee_email)")
+
+            # Create notifications table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS notifications(
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    title VARCHAR(255) NOT NULL,
+                    message TEXT NOT NULL,
+                    notification_type VARCHAR(50) DEFAULT 'general',
+                    metadata JSONB,
+                    is_read BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications (user_id, is_read)")
+
+            # Create user OTP table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_otp_codes(
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    otp_code VARCHAR(10) NOT NULL,
+                    purpose VARCHAR(50) NOT NULL,
+                    expires_at TIMESTAMP NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    consumed_at TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_user_otp_lookup ON user_otp_codes (user_id, purpose, consumed_at)")
+
+            # Create user_storage table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_storage (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER UNIQUE NOT NULL,
+                    used_storage_mb INTEGER DEFAULT 0,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_user_storage_user ON user_storage (user_id)")
+
+            # Create user_activity table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_activity (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    action VARCHAR(255) NOT NULL,
+                    metadata TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_user_activity_user ON user_activity (user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_user_activity_created ON user_activity (created_at)")
+
             # Create chat_sessions table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS chat_sessions(
@@ -590,14 +777,7 @@ class DatabaseManager:
             # Migrate documents table if needed
             self.migrate_documents_table()
             
-            # Create test user if not exists
-            cur.execute("SELECT * FROM userdata WHERE email = %s", ("test@example.com",))
-            if not cur.fetchone():
-                test_password = hashlib.sha256("testuser1".encode()).hexdigest()
-                cur.execute(
-                    "INSERT INTO userdata (firstname, lastname, email, password) VALUES (%s, %s, %s, %s)",
-                    ("Test", "User", "test@example.com", test_password)
-                )
+           
                 
         elif self.use_rds:
             # MySQL table creation statements
@@ -615,7 +795,9 @@ class DatabaseManager:
                     verification_token_expires TIMESTAMP NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     is_active BOOLEAN DEFAULT TRUE,
-                    profile_image TEXT
+                    profile_image TEXT,
+                    role VARCHAR(50) DEFAULT 'user',
+                    last_login TIMESTAMP NULL
                 ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """)
             
@@ -640,7 +822,7 @@ class DatabaseManager:
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     name VARCHAR(255) UNIQUE NOT NULL,
                     description TEXT,
-                    price_monthly DECIMAL(10,2) DEFAULT 0.00,
+                    price_quarterly DECIMAL(10,2) DEFAULT 0.00,
                     price_annual DECIMAL(10,2) DEFAULT 0.00,
                     storage_gb INT DEFAULT 0,
                     project_limit INT DEFAULT 0,
@@ -667,7 +849,7 @@ class DatabaseManager:
                     current_period_start TIMESTAMP,
                     current_period_end TIMESTAMP,
                     status VARCHAR(50) DEFAULT 'active',
-                    `interval` VARCHAR(20) DEFAULT 'monthly',
+                    `interval` VARCHAR(20) DEFAULT 'quarterly',
                     auto_renew BOOLEAN DEFAULT TRUE,
                     is_active BOOLEAN DEFAULT TRUE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -692,7 +874,21 @@ class DatabaseManager:
                     INDEX idx_user_id (user_id)
                 ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """)
-            
+
+            # Create user_activity table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_activity (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NOT NULL,
+                    action VARCHAR(255) NOT NULL,
+                    metadata TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    INDEX idx_activity_user (user_id),
+                    INDEX idx_activity_created (created_at)
+                ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """)
+
             # Create feedback table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS feedback (
@@ -807,7 +1003,73 @@ class DatabaseManager:
                     INDEX idx_doc_id (doc_id)
                 ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """)
-            
+
+            # Create project_members table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS project_members(
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    project_id VARCHAR(255) NOT NULL,
+                    user_id INT NOT NULL,
+                    role VARCHAR(50) DEFAULT 'member',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (project_id) REFERENCES projects (project_id) ON DELETE CASCADE,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    UNIQUE KEY unique_member (project_id, user_id),
+                    INDEX idx_project_members_user (user_id)
+                ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """)
+
+            # Create project_invitations table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS project_invitations(
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    project_id VARCHAR(255) NOT NULL,
+                    inviter_id INT NOT NULL,
+                    invitee_id INT NULL,
+                    invitee_email VARCHAR(255) NOT NULL,
+                    role VARCHAR(50) DEFAULT 'member',
+                    status VARCHAR(20) DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    responded_at TIMESTAMP NULL,
+                    FOREIGN KEY (project_id) REFERENCES projects (project_id) ON DELETE CASCADE,
+                    FOREIGN KEY (inviter_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    FOREIGN KEY (invitee_id) REFERENCES userdata (id) ON DELETE SET NULL,
+                    INDEX idx_project_invitations_invitee (invitee_id),
+                    INDEX idx_project_invitations_email (invitee_email)
+                ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """)
+
+            # Create notifications table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS notifications(
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NOT NULL,
+                    title VARCHAR(255) NOT NULL,
+                    message TEXT NOT NULL,
+                    notification_type VARCHAR(50) DEFAULT 'general',
+                    metadata JSON,
+                    is_read BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    INDEX idx_notifications_user (user_id, is_read)
+                ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """)
+
+            # Create user OTP table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_otp_codes(
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NOT NULL,
+                    otp_code VARCHAR(10) NOT NULL,
+                    purpose VARCHAR(50) NOT NULL,
+                    expires_at TIMESTAMP NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    consumed_at TIMESTAMP NULL,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    INDEX idx_user_otp_lookup (user_id, purpose, consumed_at)
+                ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """)
+
             # Create chat_sessions table for enhanced session management
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS chat_sessions(
@@ -866,7 +1128,7 @@ class DatabaseManager:
                 {
                     "name": "Solo Plan",
                     "description": "Project Repository & Document Upload (up to 3 active projects, 15GB storage)",
-                    "price_monthly": 0.0,
+                    "price_quarterly": 0.0,
                     "price_annual": 99.0,
                     "storage_gb": 15,
                     "project_limit": 3,
@@ -887,7 +1149,7 @@ class DatabaseManager:
                 {
                     "name": "Team Plan", 
                     "description": "Team Collaboration (shared project folders, concurrent editing)",
-                    "price_monthly": 49.0,
+                    "price_quarterly": 49.0,
                     "price_annual": 499.0,
                     "storage_gb": 50,
                     "project_limit": 10,
@@ -911,11 +1173,11 @@ class DatabaseManager:
                 cur.execute("SELECT * FROM subscription_plans WHERE name = %s", (plan["name"],))
                 if not cur.fetchone():
                     cur.execute("""
-                        INSERT INTO subscription_plans 
-                        (name, description, price_monthly, price_annual, storage_gb, project_limit, user_limit, action_limit, features, has_free_trial, trial_days)
+                        INSERT INTO subscription_plans
+                        (name, description, price_quarterly, price_annual, storage_gb, project_limit, user_limit, action_limit, features, has_free_trial, trial_days)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
-                        plan["name"], plan["description"], plan["price_monthly"], plan["price_annual"],
+                        plan["name"], plan["description"], plan["price_quarterly"], plan["price_annual"],
                         plan["storage_gb"], plan["project_limit"], plan["user_limit"], plan["action_limit"],
                         plan["features"], plan["has_free_trial"], plan["trial_days"]
                     ))
@@ -935,7 +1197,9 @@ class DatabaseManager:
                     verification_token_expires DATETIME,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     is_active BOOLEAN DEFAULT 1,
-                    profile_image TEXT
+                    profile_image TEXT,
+                    role TEXT DEFAULT 'user',
+                    last_login DATETIME
                 )
             """)
             
@@ -958,7 +1222,7 @@ class DatabaseManager:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT UNIQUE NOT NULL,
                     description TEXT,
-                    price_monthly REAL DEFAULT 0.00,
+                    price_quarterly REAL DEFAULT 0.00,
                     price_annual REAL DEFAULT 0.00,
                     storage_gb INTEGER DEFAULT 0,
                     project_limit INTEGER DEFAULT 0,
@@ -983,7 +1247,7 @@ class DatabaseManager:
                     current_period_start DATETIME,
                     current_period_end DATETIME,
                     status TEXT DEFAULT 'active',
-                    `interval` TEXT DEFAULT 'monthly',
+                    `interval` TEXT DEFAULT 'quarterly',
                     auto_renew BOOLEAN DEFAULT 1,
                     is_active BOOLEAN DEFAULT 1,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1003,7 +1267,22 @@ class DatabaseManager:
                     FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE
                 )
             """)
-            
+
+            # Create user_activity table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_activity (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    action TEXT NOT NULL,
+                    metadata TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_user_activity_user ON user_activity (user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_user_activity_created ON user_activity (created_at)")
+
             # Create feedback table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS feedback (
@@ -1126,7 +1405,77 @@ class DatabaseManager:
             # Create indexes
             cur.execute("CREATE INDEX IF NOT EXISTS idx_project_documents_project_id ON project_documents (project_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_project_documents_doc_id ON project_documents (doc_id)")
-            
+
+            # Create project_members table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS project_members(
+                    id INTEGER PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    role TEXT DEFAULT 'member',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (project_id) REFERENCES projects (project_id) ON DELETE CASCADE,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    UNIQUE (project_id, user_id)
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members (user_id)")
+
+            # Create project_invitations table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS project_invitations(
+                    id INTEGER PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    inviter_id INTEGER NOT NULL,
+                    invitee_id INTEGER,
+                    invitee_email TEXT NOT NULL,
+                    role TEXT DEFAULT 'member',
+                    status TEXT DEFAULT 'pending',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    responded_at DATETIME,
+                    FOREIGN KEY (project_id) REFERENCES projects (project_id) ON DELETE CASCADE,
+                    FOREIGN KEY (inviter_id) REFERENCES userdata (id) ON DELETE CASCADE,
+                    FOREIGN KEY (invitee_id) REFERENCES userdata (id) ON DELETE SET NULL
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_project_invitations_invitee ON project_invitations (invitee_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_project_invitations_email ON project_invitations (invitee_email)")
+
+            # Create notifications table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS notifications(
+                    id INTEGER PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    notification_type TEXT DEFAULT 'general',
+                    metadata TEXT,
+                    is_read BOOLEAN DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications (user_id, is_read)")
+
+            # Create user OTP table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_otp_codes(
+                    id INTEGER PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    otp_code TEXT NOT NULL,
+                    purpose TEXT NOT NULL,
+                    expires_at DATETIME NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    consumed_at DATETIME,
+                    FOREIGN KEY (user_id) REFERENCES userdata (id) ON DELETE CASCADE
+                )
+            """)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_user_otp_lookup ON user_otp_codes (user_id, purpose, consumed_at)")
+
             # Create chat_sessions table for enhanced session management
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS chat_sessions(
@@ -1188,6 +1537,7 @@ class DatabaseManager:
         # Run migrations
         self._migrate_documents_schema()
         self._migrate_email_verification_schema()
+        self._migrate_user_profile_schema()
         self._migrate_session_schema()
     
     def _get_placeholder(self):
@@ -1195,6 +1545,14 @@ class DatabaseManager:
         if self.use_rds:
             return "%s" if not self.is_postgres else "%s"
         return "?"
+
+    def _quote_identifier(self, identifier: str) -> str:
+        """Safely quote a column or table identifier for the active database."""
+        if self.use_rds:
+            if self.is_postgres:
+                return f'"{identifier}"'
+            return f'`{identifier}`'
+        return f'"{identifier}"'
     
     def ensure_pgvector_extension(self) -> bool:
         """Ensure pgvector extension is available in PostgreSQL"""
@@ -1926,6 +2284,85 @@ class DatabaseManager:
             if conn:
                 conn.close()
 
+    def _migrate_user_profile_schema(self):
+        """Ensure profile-related columns exist on userdata table"""
+        conn = None
+        try:
+            conn = self.get_connection()
+            cur = conn.cursor()
+
+            if self.use_rds:
+                if self.is_postgres:
+                    cur.execute(
+                        """
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_name = 'userdata'
+                        """
+                    )
+                    columns = {row[0] for row in cur.fetchall()}
+
+                    statements = []
+                    if 'is_active' not in columns:
+                        statements.append("ALTER TABLE userdata ADD COLUMN is_active BOOLEAN DEFAULT TRUE")
+                    if 'profile_image' not in columns:
+                        statements.append("ALTER TABLE userdata ADD COLUMN profile_image TEXT")
+                    if 'role' not in columns:
+                        statements.append("ALTER TABLE userdata ADD COLUMN role VARCHAR(50) DEFAULT 'user'")
+                    if 'last_login' not in columns:
+                        statements.append("ALTER TABLE userdata ADD COLUMN last_login TIMESTAMP NULL")
+
+                    for statement in statements:
+                        cur.execute(statement)
+
+                    if statements:
+                        conn.commit()
+                else:
+                    cur.execute(
+                        """
+                        SELECT COLUMN_NAME
+                        FROM INFORMATION_SCHEMA.COLUMNS
+                        WHERE TABLE_SCHEMA = %s
+                        AND TABLE_NAME = 'userdata'
+                        """,
+                        (settings.DB_NAME,)
+                    )
+                    columns = {row[0] for row in cur.fetchall()}
+
+                    def ensure(column: str, definition: str):
+                        if column not in columns:
+                            cur.execute(f"ALTER TABLE userdata ADD COLUMN {definition}")
+                            columns.add(column)
+
+                    ensure('is_active', 'BOOLEAN DEFAULT TRUE')
+                    ensure('profile_image', 'TEXT')
+                    ensure('role', "VARCHAR(50) DEFAULT 'user'")
+                    ensure('last_login', 'TIMESTAMP NULL')
+
+                    conn.commit()
+            else:
+                cur.execute("PRAGMA table_info(userdata)")
+                columns = {row[1] for row in cur.fetchall()}
+
+                def ensure_sqlite(column: str, definition: str):
+                    if column not in columns:
+                        cur.execute(f"ALTER TABLE userdata ADD COLUMN {definition}")
+                        columns.add(column)
+
+                ensure_sqlite('is_active', 'BOOLEAN DEFAULT 1')
+                ensure_sqlite('profile_image', 'TEXT')
+                ensure_sqlite('role', "TEXT DEFAULT 'user'")
+                ensure_sqlite('last_login', 'DATETIME')
+
+                conn.commit()
+        except Exception as e:
+            print(f"User profile schema migration error: {e}")
+            if conn:
+                conn.rollback()
+        finally:
+            if conn:
+                conn.close()
+
     def _migrate_session_schema(self):
         """Migrate existing tables to support enhanced session management"""
         conn = None
@@ -2099,25 +2536,20 @@ class DatabaseManager:
         conn = self.get_connection()
         cur = conn.cursor()
         placeholder = self._get_placeholder()
-        
+
         try:
             cur.execute(
-                f"SELECT id, firstname, lastname, email, password, google_id, is_verified, verification_token, verification_token_expires, created_at, is_active, profile_image FROM userdata WHERE email = {placeholder}",
+                f"SELECT id, firstname, lastname, email, password, google_id, is_verified, verification_token, "
+                f"verification_token_expires, created_at, is_active, profile_image, role, last_login "
+                f"FROM userdata WHERE email = {placeholder}",
                 (email,)
             )
             row = cur.fetchone()
-            
-            if row:
-                return User(
-                    id=row[0], firstname=row[1], lastname=row[2], email=row[3], password=row[4],
-                    google_id=row[5], is_verified=bool(row[6]), verification_token=row[7],
-                    verification_token_expires=row[8], created_at=row[9], is_active=bool(row[10]),
-                    profile_image=row[11]
-                )
-            return None
+
+            return self._map_user_row(row)
         finally:
             conn.close()
-    
+
     def get_user_by_id(self, user_id: int) -> Optional[User]:
         """Get user by ID"""
         conn = self.get_connection()
@@ -2126,45 +2558,54 @@ class DatabaseManager:
         
         try:
             cur.execute(
-                f"SELECT id, firstname, lastname, email, password, google_id, is_verified, verification_token, verification_token_expires, created_at, is_active, profile_image FROM userdata WHERE id = {placeholder}",
+                f"SELECT id, firstname, lastname, email, password, google_id, is_verified, verification_token, "
+                f"verification_token_expires, created_at, is_active, profile_image, role, last_login "
+                f"FROM userdata WHERE id = {placeholder}",
                 (user_id,)
             )
             row = cur.fetchone()
-            
-            if row:
-                return User(
-                    id=row[0], firstname=row[1], lastname=row[2], email=row[3], password=row[4],
-                    google_id=row[5], is_verified=bool(row[6]), verification_token=row[7],
-                    verification_token_expires=row[8], created_at=row[9], is_active=bool(row[10]),
-                    profile_image=row[11]
-                )
-            return None
+
+            return self._map_user_row(row)
         finally:
             conn.close()
     
     def verify_user_credentials(self, email: str, password: str) -> Optional[User]:
         """Verify user credentials"""
         hashed_password = hashlib.sha256(password.encode()).hexdigest()
-        
+
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"SELECT id, firstname, lastname, email, password, google_id, is_verified, verification_token, "
+                f"verification_token_expires, created_at, is_active, profile_image, role, last_login "
+                f"FROM userdata WHERE email = {placeholder} AND password = {placeholder}",
+                (email, hashed_password)
+            )
+            row = cur.fetchone()
+
+            return self._map_user_row(row)
+        finally:
+            conn.close()
+
+    def get_user_by_google_id(self, google_id: str) -> Optional[User]:
+        """Get user by Google ID"""
         conn = self.get_connection()
         cur = conn.cursor()
         placeholder = self._get_placeholder()
         
         try:
             cur.execute(
-                f"SELECT id, firstname, lastname, email, password, google_id, is_verified, verification_token, verification_token_expires, created_at, is_active, profile_image FROM userdata WHERE email = {placeholder} AND password = {placeholder}",
-                (email, hashed_password)
+                f"SELECT id, firstname, lastname, email, password, google_id, is_verified, verification_token, "
+                f"verification_token_expires, created_at, is_active, profile_image, role, last_login "
+                f"FROM userdata WHERE google_id = {placeholder}",
+                (google_id,)
             )
             row = cur.fetchone()
-            
-            if row:
-                return User(
-                    id=row[0], firstname=row[1], lastname=row[2], email=row[3], password=row[4],
-                    google_id=row[5], is_verified=bool(row[6]), verification_token=row[7],
-                    verification_token_expires=row[8], created_at=row[9], is_active=bool(row[10]),
-                    profile_image=row[11]
-                )
-            return None
+
+            return self._map_user_row(row)
         finally:
             conn.close()
     
@@ -2173,13 +2614,31 @@ class DatabaseManager:
         conn = self.get_connection()
         cur = conn.cursor()
         placeholder = self._get_placeholder()
-        
+
         try:
             cur.execute(f"UPDATE userdata SET google_id = {placeholder} WHERE id = {placeholder}", (google_id, user_id))
             conn.commit()
         finally:
             conn.close()
-    
+
+    def update_user_password(self, user_id: int, new_password: str) -> bool:
+        """Update user password"""
+        hashed_password = hashlib.sha256(new_password.encode()).hexdigest()
+
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"UPDATE userdata SET password = {placeholder} WHERE id = {placeholder}",
+                (hashed_password, user_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
     def update_user_profile(self, user_id: int, **kwargs) -> bool:
         """Update user profile"""
         conn = self.get_connection()
@@ -2189,17 +2648,17 @@ class DatabaseManager:
         try:
             update_fields = []
             params = []
-            
+
             for key, value in kwargs.items():
                 if value is not None:
-                    update_fields.append(f"{key} = ?")
+                    update_fields.append(f"{key} = {placeholder}")
                     params.append(value)
-            
+
             if not update_fields:
                 return False
-            
+
             params.append(user_id)
-            query = f"UPDATE userdata SET {', '.join(update_fields)} WHERE id = ?"
+            query = f"UPDATE userdata SET {', '.join(update_fields)} WHERE id = {placeholder}"
             cur.execute(query, params)
             conn.commit()
             return cur.rowcount > 0
@@ -2242,22 +2701,15 @@ class DatabaseManager:
         
         try:
             cur.execute("""
-                SELECT id, firstname, lastname, email, password, google_id, is_verified, 
-                       verification_token, verification_token_expires, created_at, is_active, profile_image 
-                FROM userdata 
+                SELECT id, firstname, lastname, email, password, google_id, is_verified,
+                       verification_token, verification_token_expires, created_at, is_active, profile_image,
+                       role, last_login
+                FROM userdata
                 ORDER BY created_at DESC
             """)
             rows = cur.fetchall()
-            
-            return [
-                User(
-                    id=row[0], firstname=row[1], lastname=row[2], email=row[3], password=row[4],
-                    google_id=row[5], is_verified=bool(row[6]), verification_token=row[7],
-                    verification_token_expires=row[8], created_at=row[9], is_active=bool(row[10]),
-                    profile_image=row[11]
-                )
-                for row in rows
-            ]
+
+            return [self._map_user_row(row) for row in rows if row]
         finally:
             conn.close()
 
@@ -2270,9 +2722,10 @@ class DatabaseManager:
         try:
             # Base query
             query = """
-                SELECT id, firstname, lastname, email, password, google_id, is_verified, 
-                    verification_token, verification_token_expires, created_at, is_active, profile_image 
-                FROM userdata 
+                SELECT id, firstname, lastname, email, password, google_id, is_verified,
+                    verification_token, verification_token_expires, created_at, is_active, profile_image,
+                    role, last_login
+                FROM userdata
                 WHERE 1=1
             """
             params = []
@@ -2302,15 +2755,44 @@ class DatabaseManager:
             cur.execute(query, params)
             rows = cur.fetchall()
             
-            return [
-                User(
-                    id=row[0], firstname=row[1], lastname=row[2], email=row[3], password=row[4],
-                    google_id=row[5], is_verified=bool(row[6]), verification_token=row[7],
-                    verification_token_expires=row[8], created_at=row[9], is_active=bool(row[10]),
-                    profile_image=row[11]
-                )
-                for row in rows
-            ]
+            return [self._map_user_row(row) for row in rows if row]
+        finally:
+            conn.close()
+
+    def get_all_users_with_filters(self, status: Optional[str] = None, search: Optional[str] = None) -> List[User]:
+        """Get all users applying optional status/search filters"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            query = """
+                SELECT id, firstname, lastname, email, password, google_id, is_verified,
+                    verification_token, verification_token_expires, created_at, is_active, profile_image,
+                    role, last_login
+                FROM userdata
+                WHERE 1=1
+            """
+            params: List[Any] = []
+
+            if status:
+                if status == "active":
+                    query += f" AND is_active = {placeholder}"
+                    params.append(True)
+                elif status == "inactive":
+                    query += f" AND is_active = {placeholder}"
+                    params.append(False)
+
+            if search:
+                query += f" AND (email LIKE {placeholder} OR firstname LIKE {placeholder} OR lastname LIKE {placeholder})"
+                search_term = f"%{search}%"
+                params.extend([search_term, search_term, search_term])
+
+            query += " ORDER BY created_at DESC"
+
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            return [self._map_user_row(row) for row in rows if row]
         finally:
             conn.close()
 
@@ -2419,9 +2901,9 @@ class DatabaseManager:
             conn.close()
 
     # Subscription plan methods
-    def create_subscription_plan(self, name: str, description: str, price_monthly: float, price_annual: float,
-                           storage_gb: int, project_limit: int, user_limit: int, action_limit: int,
-                           features: List[str], has_free_trial: bool, trial_days: int) -> int:
+    def create_subscription_plan(self, name: str, description: str, price_quarterly: float, price_annual: float,
+                                 storage_gb: int, project_limit: int, user_limit: int, action_limit: int,
+                                 features: List[str], has_free_trial: bool, trial_days: int) -> int:
         """Create a new subscription plan"""
         conn = self.get_connection()
         cur = conn.cursor()
@@ -2436,8 +2918,8 @@ class DatabaseManager:
             print(f"DB Method - Features JSON: {features_json}")
             
             cur.execute(
-                f"INSERT INTO subscription_plans (name, description, price_monthly, price_annual, storage_gb, project_limit, user_limit, action_limit, features, has_free_trial, trial_days) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                (name, description, price_monthly, price_annual, storage_gb, project_limit, user_limit, action_limit, features_json, has_free_trial, trial_days)
+                f"INSERT INTO subscription_plans (name, description, price_quarterly, price_annual, storage_gb, project_limit, user_limit, action_limit, features, has_free_trial, trial_days) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                (name, description, price_quarterly, price_annual, storage_gb, project_limit, user_limit, action_limit, features_json, has_free_trial, trial_days)
             )
             conn.commit()
             
@@ -2455,7 +2937,7 @@ class DatabaseManager:
         cur = conn.cursor()
         
         try:
-            cur.execute("SELECT id, name, description, price_monthly, price_annual, storage_gb, project_limit, user_limit, action_limit, features, is_active, has_free_trial, trial_days, created_at FROM subscription_plans ORDER BY price_monthly ASC")
+            cur.execute("SELECT id, name, description, price_quarterly, price_annual, storage_gb, project_limit, user_limit, action_limit, features, is_active, has_free_trial, trial_days, created_at FROM subscription_plans ORDER BY price_quarterly ASC")
             rows = cur.fetchall()
             
             plans = []
@@ -2490,7 +2972,7 @@ class DatabaseManager:
                 
                 plans.append(SubscriptionPlan(
                     id=row[0], name=row[1], description=row[2], 
-                    price_monthly=float(row[3]), price_annual=float(row[4]),
+                    price_quarterly=float(row[3]), price_annual=float(row[4]),
                     storage_gb=row[5], project_limit=row[6], user_limit=row[7],
                     action_limit=row[8], features=features, is_active=bool(row[10]),
                     has_free_trial=bool(row[11]), trial_days=row[12], created_at=row[13]
@@ -2506,7 +2988,7 @@ class DatabaseManager:
         
         try:
             # Use the placeholder variable correctly
-            query = f"SELECT id, name, description, price_monthly, price_annual, storage_gb, project_limit, user_limit, action_limit, features, is_active, has_free_trial, trial_days, created_at FROM subscription_plans WHERE id = {placeholder}"
+            query = f"SELECT id, name, description, price_quarterly, price_annual, storage_gb, project_limit, user_limit, action_limit, features, is_active, has_free_trial, trial_days, created_at FROM subscription_plans WHERE id = {placeholder}"
             cur.execute(query, (plan_id,))  # Pass parameters as a tuple
             row = cur.fetchone()
             
@@ -2521,7 +3003,7 @@ class DatabaseManager:
                 
                 return SubscriptionPlan(
                     id=row[0], name=row[1], description=row[2], 
-                    price_monthly=float(row[3]), price_annual=float(row[4]),
+                    price_quarterly=float(row[3]), price_annual=float(row[4]),
                     storage_gb=row[5], project_limit=row[6], user_limit=row[7],
                     action_limit=row[8], features=features, is_active=bool(row[10]),
                     has_free_trial=bool(row[11]), trial_days=row[12], created_at=row[13]
@@ -2537,7 +3019,7 @@ class DatabaseManager:
         placeholder = self._get_placeholder()
         
         try:
-            cur.execute("SELECT id, name, description, price_monthly, price_annual, storage_gb, project_limit, user_limit, action_limit, features, is_active, has_free_trial, trial_days, created_at FROM subscription_plans WHERE name = ?", (name,))
+            cur.execute("SELECT id, name, description, price_quarterly, price_annual, storage_gb, project_limit, user_limit, action_limit, features, is_active, has_free_trial, trial_days, created_at FROM subscription_plans WHERE name = ?", (name,))
             row = cur.fetchone()
             
             if row:
@@ -2550,7 +3032,7 @@ class DatabaseManager:
                 
                 return SubscriptionPlan(
                     id=row[0], name=row[1], description=row[2], 
-                    price_monthly=float(row[3]), price_annual=float(row[4]),
+                    price_quarterly=float(row[3]), price_annual=float(row[4]),
                     storage_gb=row[5], project_limit=row[6], user_limit=row[7],
                     action_limit=row[8], features=features, is_active=bool(row[10]),
                     has_free_trial=bool(row[11]), trial_days=row[12], created_at=row[13]
@@ -2669,7 +3151,7 @@ class DatabaseManager:
         conn = self.get_connection()
         cur = conn.cursor()
         placeholder = self._get_placeholder()
-        
+
         try:
             if self.use_rds:
                 cur.execute(
@@ -2683,6 +3165,85 @@ class DatabaseManager:
                 )
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def update_user_last_login(self, user_id: int) -> bool:
+        """Update user's last login timestamp"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            if self.use_rds:
+                cur.execute(
+                    f"UPDATE userdata SET last_login = CURRENT_TIMESTAMP WHERE id = {placeholder}",
+                    (user_id,)
+                )
+            else:
+                cur.execute(
+                    f"UPDATE userdata SET last_login = datetime('now') WHERE id = {placeholder}",
+                    (user_id,)
+                )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def log_user_activity(self, user_id: int, action: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """Record a user activity entry"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            metadata_json = json.dumps(metadata) if metadata is not None else None
+            cur.execute(
+                f"INSERT INTO user_activity (user_id, action, metadata) VALUES ({placeholder}, {placeholder}, {placeholder})",
+                (user_id, action, metadata_json)
+            )
+            conn.commit()
+            return True
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            print(f"Error logging user activity: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def get_user_activities(self, user_id: int, limit: int = 50) -> List[UserActivity]:
+        """Retrieve recent user activities"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"SELECT id, user_id, action, metadata, created_at FROM user_activity WHERE user_id = {placeholder} ORDER BY created_at DESC LIMIT {placeholder}",
+                (user_id, limit)
+            )
+            rows = cur.fetchall()
+
+            activities: List[UserActivity] = []
+            for row in rows:
+                metadata_raw = row[3]
+                try:
+                    metadata_value = json.loads(metadata_raw) if metadata_raw else None
+                except json.JSONDecodeError:
+                    metadata_value = metadata_raw
+
+                activities.append(
+                    UserActivity(
+                        id=row[0],
+                        user_id=row[1],
+                        action=row[2],
+                        metadata=metadata_value,
+                        created_at=row[4],
+                    )
+                )
+
+            return activities
         finally:
             conn.close()
 
@@ -2929,21 +3490,48 @@ class DatabaseManager:
             conn.close()
 
     # User subscription methods
-    def create_user_subscription(self, user_id: int, plan_id: int, stripe_subscription_id: str = None,
-                               stripe_customer_id: str = None, interval: str = "monthly") -> int:
+    def create_user_subscription(
+        self,
+        user_id: int,
+        plan_id: int,
+        stripe_subscription_id: str = None,
+        stripe_customer_id: str = None,
+        interval: str = "quarterly",
+        current_period_start: Optional[datetime] = None,
+        current_period_end: Optional[datetime] = None,
+        status: str = "active",
+        auto_renew: bool = True,
+        is_active: bool = True,
+    ) -> int:
         """Create user subscription"""
         conn = self.get_connection()
         cur = conn.cursor()
         placeholder = self._get_placeholder()
-        
+        interval_column = self._quote_identifier("interval")
+
         try:
             # FIXED: Use backticks around interval in the query
             cur.execute(f"""
-                INSERT INTO user_subscriptions (user_id, plan_id, stripe_subscription_id, stripe_customer_id, `interval`) 
-                VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
-            """, (user_id, plan_id, stripe_subscription_id, stripe_customer_id, interval))
+                INSERT INTO user_subscriptions (
+                    user_id, plan_id, stripe_subscription_id, stripe_customer_id, {interval_column},
+                    current_period_start, current_period_end, status, auto_renew, is_active
+                )
+                VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder},
+                        {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
+            """, (
+                user_id,
+                plan_id,
+                stripe_subscription_id,
+                stripe_customer_id,
+                interval,
+                current_period_start,
+                current_period_end,
+                status,
+                auto_renew,
+                is_active,
+            ))
             conn.commit()
-            
+
             cur.execute(f"SELECT id FROM user_subscriptions WHERE user_id = {placeholder} ORDER BY created_at DESC LIMIT 1", (user_id,))
             subscription = cur.fetchone()
             return subscription[0] if subscription else None
@@ -2955,19 +3543,21 @@ class DatabaseManager:
         conn = self.get_connection()
         cur = conn.cursor()
         placeholder = self._get_placeholder()
-        
+        interval_column = self._quote_identifier("interval")
+        active_flag = True if self.use_rds else 1
+
         try:
             # FIXED: Use backticks around interval in the query
             cur.execute(f"""
                 SELECT us.id, us.user_id, us.plan_id, us.stripe_subscription_id, us.stripe_customer_id,
-                    us.current_period_start, us.current_period_end, us.status, us.interval, 
+                    us.current_period_start, us.current_period_end, us.status, us.{interval_column} AS interval_value,
                     us.auto_renew, us.is_active, us.created_at, us.updated_at
                 FROM user_subscriptions us
-                WHERE us.user_id = {placeholder} AND us.is_active = TRUE
+                WHERE us.user_id = {placeholder} AND us.is_active = {placeholder}
                 ORDER BY us.created_at DESC
                 LIMIT 1
-            """, (user_id,))
-            
+            """, (user_id, active_flag))
+
             row = cur.fetchone()
             if row:
                 return UserSubscription(
@@ -2985,17 +3575,18 @@ class DatabaseManager:
         conn = self.get_connection()
         cur = conn.cursor()
         placeholder = self._get_placeholder()
-        
+        interval_column = self._quote_identifier("interval")
+
         try:
             # FIXED: Use backticks around interval in the query
             cur.execute(f"""
                 SELECT id, user_id, plan_id, stripe_subscription_id, stripe_customer_id,
-                       current_period_start, current_period_end, status, `interval`, 
+                       current_period_start, current_period_end, status, {interval_column} AS interval_value,
                        auto_renew, is_active, created_at, updated_at
-                FROM user_subscriptions 
+                FROM user_subscriptions
                 WHERE stripe_subscription_id = {placeholder}
             """, (stripe_subscription_id,))
-            
+
             row = cur.fetchone()
             if row:
                 return UserSubscription(
@@ -3013,30 +3604,42 @@ class DatabaseManager:
         conn = self.get_connection()
         cur = conn.cursor()
         placeholder = self._get_placeholder()
-        
+        interval_column = self._quote_identifier("interval")
+
+        allowed_columns = {
+            'plan_id': 'plan_id',
+            'stripe_subscription_id': 'stripe_subscription_id',
+            'stripe_customer_id': 'stripe_customer_id',
+            'current_period_start': 'current_period_start',
+            'current_period_end': 'current_period_end',
+            'status': 'status',
+            'interval': interval_column,
+            'auto_renew': 'auto_renew',
+            'is_active': 'is_active',
+        }
+
         try:
             update_fields = []
             params = []
-            
+
             for key, value in kwargs.items():
-                if value is not None:
-                    # FIXED: Use backticks around interval if it's in the kwargs
-                    if key == 'interval':
-                        update_fields.append("`interval` = ?")
-                    else:
-                        update_fields.append(f"{key} = ?")
-                    params.append(value)
-            
+                if value is None or key not in allowed_columns:
+                    continue
+
+                column_name = allowed_columns[key]
+                update_fields.append(f"{column_name} = {placeholder}")
+                params.append(value)
+
             if not update_fields:
                 return False
-            
+
             if self.use_rds:
                 update_fields.append("updated_at = CURRENT_TIMESTAMP")
             else:
                 update_fields.append("updated_at = datetime('now')")
-            
+
             params.append(subscription_id)
-            query = f"UPDATE user_subscriptions SET {', '.join(update_fields)} WHERE id = ?"
+            query = f"UPDATE user_subscriptions SET {', '.join(update_fields)} WHERE id = {placeholder}"
             cur.execute(query, params)
             conn.commit()
             return cur.rowcount > 0
@@ -3215,19 +3818,39 @@ class DatabaseManager:
         finally:
             conn.close()
     # Email verification methods
-    def create_verification_token(self, user_id: int, token: str, expires_at: datetime) -> bool:
-        """Create or update verification token for user"""
+    def create_verification_token(
+        self,
+        user_id: int,
+        token: str,
+        expires_at: datetime,
+        purpose: str = "email_verification"
+    ) -> bool:
+        """Create or update verification/OTP token for user"""
         conn = self.get_connection()
         cur = conn.cursor()
         placeholder = self._get_placeholder()
-        
+
         try:
+            # Update legacy verification columns only for email verification purpose
+            if purpose == "email_verification":
+                cur.execute(
+                    f"UPDATE userdata SET verification_token = {placeholder}, verification_token_expires = {placeholder} WHERE id = {placeholder}",
+                    (token, expires_at, user_id)
+                )
+
+            # Ensure only one active OTP per user/purpose
             cur.execute(
-                f"UPDATE userdata SET verification_token = {placeholder}, verification_token_expires = {placeholder} WHERE id = {placeholder}",
-                (token, expires_at, user_id)
+                f"DELETE FROM user_otp_codes WHERE user_id = {placeholder} AND purpose = {placeholder}",
+                (user_id, purpose)
             )
+
+            cur.execute(
+                f"INSERT INTO user_otp_codes (user_id, otp_code, purpose, expires_at) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                (user_id, token, purpose, expires_at)
+            )
+
             conn.commit()
-            return cur.rowcount > 0
+            return True
         finally:
             conn.close()
     
@@ -3253,7 +3876,77 @@ class DatabaseManager:
             return None
         finally:
             conn.close()
-    
+
+    def get_user_otp(self, user_id: int, purpose: str) -> Optional[UserOTP]:
+        """Retrieve the most recent active OTP for a user and purpose"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"SELECT id, user_id, otp_code, purpose, expires_at, created_at, consumed_at FROM user_otp_codes WHERE user_id = {placeholder} AND purpose = {placeholder} ORDER BY created_at DESC LIMIT 1",
+                (user_id, purpose)
+            )
+            row = cur.fetchone()
+
+            if row:
+                return UserOTP(
+                    id=row[0],
+                    user_id=row[1],
+                    otp_code=row[2],
+                    purpose=row[3],
+                    expires_at=row[4],
+                    created_at=row[5],
+                    consumed_at=row[6]
+                )
+            return None
+        finally:
+            conn.close()
+
+    def get_user_otp_by_code(self, user_id: int, otp_code: str) -> Optional[UserOTP]:
+        """Retrieve the most recent active OTP for a user by code regardless of purpose"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"SELECT id, user_id, otp_code, purpose, expires_at, created_at, consumed_at FROM user_otp_codes WHERE user_id = {placeholder} AND otp_code = {placeholder} ORDER BY created_at DESC LIMIT 1",
+                (user_id, otp_code)
+            )
+            row = cur.fetchone()
+
+            if row:
+                return UserOTP(
+                    id=row[0],
+                    user_id=row[1],
+                    otp_code=row[2],
+                    purpose=row[3],
+                    expires_at=row[4],
+                    created_at=row[5],
+                    consumed_at=row[6]
+                )
+            return None
+        finally:
+            conn.close()
+
+    def consume_user_otp(self, user_id: int, otp_code: str, purpose: str) -> bool:
+        """Mark an OTP as consumed"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"UPDATE user_otp_codes SET consumed_at = CURRENT_TIMESTAMP WHERE user_id = {placeholder} AND otp_code = {placeholder} AND purpose = {placeholder} AND consumed_at IS NULL",
+                (user_id, otp_code, purpose)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
     def verify_user_email(self, user_id: int) -> bool:
         """Mark user email as verified and clear verification token"""
         conn = self.get_connection()
@@ -3269,7 +3962,7 @@ class DatabaseManager:
             return cur.rowcount > 0
         finally:
             conn.close()
-    
+
     def clear_expired_verification_tokens(self):
         """Clear expired verification tokens"""
         conn = self.get_connection()
@@ -3286,6 +3979,20 @@ class DatabaseManager:
                 )
             conn.commit()
             return cur.rowcount
+        finally:
+            conn.close()
+
+    def clear_expired_otps(self):
+        """Remove expired OTP codes"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+
+        try:
+            if self.use_rds:
+                cur.execute("DELETE FROM user_otp_codes WHERE expires_at < NOW() OR consumed_at IS NOT NULL")
+            else:
+                cur.execute("DELETE FROM user_otp_codes WHERE expires_at < datetime('now') OR consumed_at IS NOT NULL")
+            conn.commit()
         finally:
             conn.close()
 
@@ -3731,7 +4438,375 @@ class DatabaseManager:
             return result
         finally:
             conn.close()
-    
+
+    def get_shared_projects_for_user(self, user_id: int) -> List[Dict[str, Any]]:
+        """Get projects shared with the user along with membership role"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"SELECT p.id, p.project_id, p.name, p.description, p.user_id, p.doc_ids, p.created_at, p.updated_at, pm.role FROM projects p INNER JOIN project_members pm ON p.project_id = pm.project_id WHERE pm.user_id = {placeholder} ORDER BY pm.created_at DESC",
+                (user_id,)
+            )
+            rows = cur.fetchall()
+
+            shared = []
+            for row in rows:
+                doc_ids = None
+                if row[5]:
+                    try:
+                        doc_ids = json.loads(row[5])
+                    except Exception:
+                        doc_ids = [row[5]]
+
+                shared.append({
+                    "project": Project(
+                        id=row[0],
+                        project_id=row[1],
+                        name=row[2],
+                        description=row[3],
+                        user_id=row[4],
+                        doc_ids=doc_ids,
+                        created_at=row[6],
+                        updated_at=row[7]
+                    ),
+                    "role": row[8]
+                })
+            return shared
+        finally:
+            conn.close()
+
+    def get_project_by_id(self, project_id: str) -> Optional[Project]:
+        """Get a single project by its project_id"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"SELECT id, project_id, name, description, user_id, doc_ids, created_at, updated_at FROM projects WHERE project_id = {placeholder}",
+                (project_id,)
+            )
+            row = cur.fetchone()
+            
+            if not row:
+                return None
+            
+            doc_ids = None
+            if row[5]:
+                try:
+                    doc_ids = json.loads(row[5])
+                except:
+                    doc_ids = [row[5]]
+            
+            return Project(
+                id=row[0], project_id=row[1], name=row[2], description=row[3],
+                user_id=row[4], doc_ids=doc_ids, created_at=row[6], updated_at=row[7]
+            )
+        finally:
+            conn.close()
+
+    def get_project_members(self, project_id: str) -> List[ProjectMember]:
+        """Retrieve members for a project"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"SELECT id, project_id, user_id, role, created_at FROM project_members WHERE project_id = {placeholder}",
+                (project_id,)
+            )
+            rows = cur.fetchall()
+            return [
+                ProjectMember(id=row[0], project_id=row[1], user_id=row[2], role=row[3], created_at=row[4])
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    def add_project_member(self, project_id: str, user_id: int, role: str = "member") -> bool:
+        """Add a member to a project"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"SELECT id FROM project_members WHERE project_id = {placeholder} AND user_id = {placeholder}",
+                (project_id, user_id)
+            )
+            if cur.fetchone():
+                return False
+
+            cur.execute(
+                f"INSERT INTO project_members (project_id, user_id, role) VALUES ({placeholder}, {placeholder}, {placeholder})",
+                (project_id, user_id, role)
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def remove_project_member(self, project_id: str, user_id: int) -> bool:
+        """Remove a member from a project"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"DELETE FROM project_members WHERE project_id = {placeholder} AND user_id = {placeholder}",
+                (project_id, user_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def user_has_project_access(self, project_id: str, user_id: int) -> bool:
+        """Check if user is owner or member of project"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"SELECT 1 FROM projects WHERE project_id = {placeholder} AND user_id = {placeholder}",
+                (project_id, user_id)
+            )
+            if cur.fetchone():
+                return True
+
+            cur.execute(
+                f"SELECT 1 FROM project_members WHERE project_id = {placeholder} AND user_id = {placeholder}",
+                (project_id, user_id)
+            )
+            return cur.fetchone() is not None
+        finally:
+            conn.close()
+
+    def get_pending_project_invitation(self, project_id: str, invitee_id: int) -> Optional[ProjectInvitation]:
+        """Fetch a pending invitation for a user"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"SELECT id, project_id, inviter_id, invitee_id, invitee_email, role, status, created_at, responded_at FROM project_invitations WHERE project_id = {placeholder} AND invitee_id = {placeholder} AND status = 'pending'",
+                (project_id, invitee_id)
+            )
+            row = cur.fetchone()
+
+            if row:
+                return ProjectInvitation(
+                    id=row[0],
+                    project_id=row[1],
+                    inviter_id=row[2],
+                    invitee_id=row[3],
+                    invitee_email=row[4],
+                    role=row[5],
+                    status=row[6],
+                    created_at=row[7],
+                    responded_at=row[8]
+                )
+            return None
+        finally:
+            conn.close()
+
+    def create_project_invitation(
+        self,
+        project_id: str,
+        inviter_id: int,
+        invitee_id: int,
+        invitee_email: str,
+        role: str = "member"
+    ) -> int:
+        """Create a new project invitation"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            # Remove existing pending invitation for same user
+            cur.execute(
+                f"DELETE FROM project_invitations WHERE project_id = {placeholder} AND invitee_id = {placeholder} AND status = 'pending'",
+                (project_id, invitee_id)
+            )
+
+            cur.execute(
+                f"INSERT INTO project_invitations (project_id, inviter_id, invitee_id, invitee_email, role) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                (project_id, inviter_id, invitee_id, invitee_email, role)
+            )
+            conn.commit()
+
+            cur.execute(f"SELECT id FROM project_invitations WHERE project_id = {placeholder} AND invitee_id = {placeholder} ORDER BY created_at DESC LIMIT 1", (project_id, invitee_id))
+            row = cur.fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
+    def get_project_invitation_by_id(self, invitation_id: int) -> Optional[ProjectInvitation]:
+        """Retrieve invitation by ID"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"SELECT id, project_id, inviter_id, invitee_id, invitee_email, role, status, created_at, responded_at FROM project_invitations WHERE id = {placeholder}",
+                (invitation_id,)
+            )
+            row = cur.fetchone()
+
+            if row:
+                return ProjectInvitation(
+                    id=row[0],
+                    project_id=row[1],
+                    inviter_id=row[2],
+                    invitee_id=row[3],
+                    invitee_email=row[4],
+                    role=row[5],
+                    status=row[6],
+                    created_at=row[7],
+                    responded_at=row[8]
+                )
+            return None
+        finally:
+            conn.close()
+
+    def update_project_invitation_status(self, invitation_id: int, status: str) -> bool:
+        """Update invitation status"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            cur.execute(
+                f"UPDATE project_invitations SET status = {placeholder}, responded_at = CURRENT_TIMESTAMP WHERE id = {placeholder}",
+                (status, invitation_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def get_user_project_invitations(self, user_id: int, status: Optional[str] = None) -> List[ProjectInvitation]:
+        """List invitations for a user"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            if status:
+                cur.execute(
+                    f"SELECT id, project_id, inviter_id, invitee_id, invitee_email, role, status, created_at, responded_at FROM project_invitations WHERE invitee_id = {placeholder} AND status = {placeholder} ORDER BY created_at DESC",
+                    (user_id, status)
+                )
+            else:
+                cur.execute(
+                    f"SELECT id, project_id, inviter_id, invitee_id, invitee_email, role, status, created_at, responded_at FROM project_invitations WHERE invitee_id = {placeholder} ORDER BY created_at DESC",
+                    (user_id,)
+                )
+
+            rows = cur.fetchall()
+            return [
+                ProjectInvitation(
+                    id=row[0],
+                    project_id=row[1],
+                    inviter_id=row[2],
+                    invitee_id=row[3],
+                    invitee_email=row[4],
+                    role=row[5],
+                    status=row[6],
+                    created_at=row[7],
+                    responded_at=row[8]
+                )
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    def create_notification(self, user_id: int, title: str, message: str, notification_type: str = "general", metadata: Dict[str, Any] = None) -> bool:
+        """Create in-app notification"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        metadata_json = json.dumps(metadata) if metadata else None
+
+        try:
+            cur.execute(
+                f"INSERT INTO notifications (user_id, title, message, notification_type, metadata) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                (user_id, title, message, notification_type, metadata_json)
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def get_notifications(self, user_id: int, include_read: bool = False, limit: int = 50) -> List[Notification]:
+        """Retrieve notifications for a user"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            if include_read:
+                cur.execute(
+                    f"SELECT id, user_id, title, message, notification_type, metadata, is_read, created_at FROM notifications WHERE user_id = {placeholder} ORDER BY created_at DESC LIMIT {limit}",
+                    (user_id,)
+                )
+            else:
+                cur.execute(
+                    f"SELECT id, user_id, title, message, notification_type, metadata, is_read, created_at FROM notifications WHERE user_id = {placeholder} AND is_read = {0 if not self.use_rds else 'FALSE'} ORDER BY created_at DESC LIMIT {limit}",
+                    (user_id,)
+                )
+
+            rows = cur.fetchall()
+            notifications = []
+            for row in rows:
+                metadata_value = row[5]
+                if metadata_value and isinstance(metadata_value, str):
+                    try:
+                        metadata_value = json.loads(metadata_value)
+                    except json.JSONDecodeError:
+                        metadata_value = {"raw": metadata_value}
+
+                notifications.append(Notification(
+                    id=row[0],
+                    user_id=row[1],
+                    title=row[2],
+                    message=row[3],
+                    notification_type=row[4],
+                    metadata=metadata_value,
+                    is_read=bool(row[6]),
+                    created_at=row[7]
+                ))
+            return notifications
+        finally:
+            conn.close()
+
+    def mark_notification_read(self, notification_id: int, user_id: int) -> bool:
+        """Mark notification as read"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+
+        try:
+            value_true = 1 if not self.use_rds else 'TRUE'
+            cur.execute(
+                f"UPDATE notifications SET is_read = {value_true} WHERE id = {placeholder} AND user_id = {placeholder}",
+                (notification_id, user_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
     # Document management methods
     def create_document(self, doc_id: str, filename: str, file_id: str, pages: int, chunks_indexed: int, user_id: int, pdf_path: str = None, vector_path: str = None) -> int:
         """Create a new document record"""
@@ -4018,6 +5093,161 @@ class DatabaseManager:
                     for row in rows
                 ]
             
+        finally:
+            conn.close()
+
+    def update_project_document(self, project_id: str, doc_ids: List[str]) -> bool:
+        """Update the document IDs for a project"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            # Convert doc_ids list to JSON string
+            doc_ids_str = json.dumps(doc_ids)
+            cur.execute(
+                f"UPDATE projects SET doc_ids = {placeholder} WHERE project_id = {placeholder}",
+                (doc_ids_str, project_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def update_project_details(self, project_id: str, name: str = None, description: str = None):
+        """Update project details"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            if self.use_rds:
+                # MySQL syntax for updating timestamp
+                if name and description:
+                    cur.execute(
+                        f"UPDATE projects SET name = {placeholder}, description = {placeholder}, updated_at = CURRENT_TIMESTAMP WHERE project_id = {placeholder}",
+                        (name, description, project_id)
+                    )
+                elif name:
+                    cur.execute(
+                        f"UPDATE projects SET name = {placeholder}, updated_at = CURRENT_TIMESTAMP WHERE project_id = {placeholder}",
+                        (name, project_id)
+                    )
+                elif description:
+                    cur.execute(
+                        f"UPDATE projects SET description = {placeholder}, updated_at = CURRENT_TIMESTAMP WHERE project_id = {placeholder}",
+                        (description, project_id)
+                    )
+            else:
+                # SQLite syntax
+                if name and description:
+                    cur.execute(
+                        "UPDATE projects SET name = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE project_id = ?",
+                        (name, description, project_id)
+                    )
+                elif name:
+                    cur.execute(
+                        "UPDATE projects SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE project_id = ?",
+                        (name, project_id)
+                    )
+                elif description:
+                    cur.execute(
+                        "UPDATE projects SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE project_id = ?",
+                        (description, project_id)
+                    )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def delete_project(self, project_id: str) -> bool:
+        """Delete a project record (cascades to project_documents)"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(f"DELETE FROM projects WHERE project_id = {placeholder}", (project_id,))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    # Project-Document relationship methods
+    def add_document_to_project(self, project_id: str, doc_id: str) -> bool:
+        """Add a document to a project"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"INSERT INTO project_documents (project_id, doc_id) VALUES ({placeholder}, {placeholder})",
+                (project_id, doc_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception as e:
+            # Handle duplicate key error gracefully
+            if "Duplicate" in str(e) or "UNIQUE constraint" in str(e):
+                return False  # Already exists
+            raise e
+        finally:
+            conn.close()
+
+    def remove_document_from_project(self, project_id: str, doc_id: str) -> bool:
+        """Remove a document from a project"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(
+                f"DELETE FROM project_documents WHERE project_id = {placeholder} AND doc_id = {placeholder}",
+                (project_id, doc_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def get_document_projects(self, doc_id: str) -> List[Project]:
+        """Get all projects that contain a specific document"""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        placeholder = self._get_placeholder()
+        
+        try:
+            cur.execute(f"""
+                SELECT p.id, p.project_id, p.name, p.description, p.user_id, p.doc_ids, p.created_at, p.updated_at 
+                FROM projects p
+                INNER JOIN project_documents pd ON p.project_id = pd.project_id
+                WHERE pd.doc_id = {placeholder}
+                ORDER BY p.created_at DESC
+            """, (doc_id,))
+            rows = cur.fetchall()
+            
+            result = []
+            for row in rows:
+                # Parse doc_ids from JSON string if present
+                doc_ids = None
+                if row[5]:
+                    try:
+                        doc_ids = json.loads(row[5])
+                    except json.JSONDecodeError:
+                        doc_ids = [row[5]]  # Fallback to old single doc_id format
+                
+                result.append(Project(
+                    id=row[0],
+                    project_id=row[1],
+                    name=row[2],
+                    description=row[3],
+                    user_id=row[4],
+                    doc_ids=doc_ids,
+                    created_at=row[6],
+                    updated_at=row[7]
+                ))
+            
+            return result
         finally:
             conn.close()
 

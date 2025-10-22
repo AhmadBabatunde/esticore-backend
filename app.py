@@ -20,6 +20,7 @@ from modules.subscription.endpoints import router as subscription_router
 from modules.storage.endpoints import router as storage_router
 from modules.feedback.endpoints import router as feedback_router
 from modules.profile.endpoints import router as profile_router
+from modules.notifications import notifications_router
 
 
 def create_app() -> FastAPI:
@@ -38,7 +39,7 @@ def create_app() -> FastAPI:
     # Add CORS middleware
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000", "https://esticore.vercel.app"],
+        allow_origins=["http://localhost:3000", "https://esticore.vercel.app","https://ecadocai.netlify.app"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -57,6 +58,7 @@ def create_app() -> FastAPI:
     app.include_router(storage_router)
     app.include_router(feedback_router)
     app.include_router(profile_router)
+    app.include_router(notifications_router)
 
     return app
 

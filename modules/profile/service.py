@@ -163,13 +163,35 @@ class ProfileService:
         """Get user's recently viewed projects"""
         try:
             recent_projects = self.db.get_recently_viewed_projects(user_id, limit=10)
-            
+
             return {
                 "recent_projects": recent_projects,
                 "count": len(recent_projects)
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error fetching recent projects: {str(e)}")
+
+    def get_user_activities(self, user_id: int, limit: int = 50) -> Dict[str, Any]:
+        """Retrieve a user's recent activity log"""
+        try:
+            activities = self.db.get_user_activities(user_id, limit)
+
+            formatted = []
+            for activity in activities:
+                formatted.append({
+                    "id": activity.id,
+                    "user_id": activity.user_id,
+                    "action": activity.action,
+                    "metadata": activity.metadata,
+                    "created_at": activity.created_at,
+                })
+
+            return {
+                "activities": formatted,
+                "count": len(formatted)
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error fetching user activities: {str(e)}")
     
     def _save_image_locally(self, user_id: int, image: UploadFile, filename: str) -> tuple[bool, str]:
         """Save image to local storage"""

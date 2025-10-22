@@ -3,8 +3,9 @@ General API endpoints for the Floor Plan Agent API
 """
 import os
 import io
+import json
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse, Response
+from fastapi.responses import FileResponse, StreamingResponse, Response, JSONResponse
 from modules.config.settings import settings
 from modules.config.utils import validate_file_path
 from modules.pdf_processing.service import pdf_processor  # Import pdf_processor
@@ -13,6 +14,104 @@ from modules.database.optimized_service import optimized_document_service
 from modules.cache.document_cache import document_cache_manager
 
 router = APIRouter(tags=["general"])
+
+
+def _build_postman_collection(openapi_schema: dict, base_url: str) -> dict:
+    """Convert the FastAPI OpenAPI schema into a Postman collection."""
+
+    info = openapi_schema.get("info", {})
+    collection = {
+        "info": {
+            "name": info.get("title", "Esticore API"),
+            "description": info.get("description", "API documentation"),
+            "version": info.get("version", "1.0.0"),
+            "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+        },
+        "item": [],
+        "variable": [
+            {"key": "baseUrl", "value": base_url}
+        ],
+    }
+
+    for path, path_item in openapi_schema.get("paths", {}).items():
+        for method, details in path_item.items():
+            if method.startswith("x-"):
+                continue
+
+            name = details.get("operationId") or details.get("summary") or f"{method.upper()} {path}"
+
+            segments = []
+            stripped = path.strip("/")
+            if stripped:
+                for segment in stripped.split("/"):
+                    if segment.startswith("{") and segment.endswith("}"):
+                        placeholder = segment[1:-1]
+                        segments.append(f"{{{{{placeholder}}}}}")
+                    else:
+                        segments.append(segment)
+
+            combined_parameters = []
+            if isinstance(path_item, dict):
+                combined_parameters.extend(path_item.get("parameters") or [])
+            combined_parameters.extend(details.get("parameters") or [])
+
+            query_params = []
+            for parameter in combined_parameters:
+                if parameter.get("in") == "query":
+                    query_params.append(
+                        {
+                            "key": parameter.get("name"),
+                            "value": f"{{{{{parameter.get('name')}}}}}",
+                            "description": parameter.get("description"),
+                            "disabled": True,
+                        }
+                    )
+
+            request_entry = {
+                "name": name,
+                "request": {
+                    "method": method.upper(),
+                    "header": [],
+                    "url": {
+                        "raw": f"{{{{baseUrl}}}}{path}",
+                        "host": ["{{baseUrl}}"],
+                        "path": segments,
+                        "query": query_params,
+                    },
+                    "description": details.get("description") or details.get("summary"),
+                },
+            }
+
+            body_spec = details.get("requestBody")
+            if isinstance(body_spec, dict):
+                example = body_spec.get("example")
+
+                if example is None:
+                    content = body_spec.get("content")
+                    if isinstance(content, dict):
+                        for media_spec in content.values():
+                            example = media_spec.get("example")
+                            if example is None and isinstance(media_spec.get("examples"), dict):
+                                first_example = next(iter(media_spec["examples"].values()), {})
+                                example = first_example.get("value")
+                            if example is not None:
+                                break
+
+                raw_body = ""
+                if isinstance(example, (dict, list)):
+                    raw_body = json.dumps(example, indent=2)
+                elif isinstance(example, str):
+                    raw_body = example
+
+                request_entry["request"]["body"] = {
+                    "mode": "raw",
+                    "raw": raw_body,
+                    "options": {"raw": {"language": "json"}},
+                }
+
+            collection["item"].append(request_entry)
+
+    return collection
 
 @router.get("/")
 def root():
@@ -31,6 +130,16 @@ def health_check():
         "app_name": settings.APP_NAME,
         "version": settings.VERSION
     }
+
+
+@router.get("/api/postman.json", response_class=JSONResponse)
+async def postman_collection(request: Request):
+    """Return a generated Postman collection for the API."""
+
+    openapi_schema = request.app.openapi()
+    base_url = str(request.base_url).rstrip("/")
+    collection = _build_postman_collection(openapi_schema, base_url)
+    return JSONResponse(content=collection)
 
 @router.get("/download")
 async def download_file(path: str):

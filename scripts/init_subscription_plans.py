@@ -14,7 +14,7 @@ def initialize_subscription_plans():
         {
             "name": "Solo Plan",
             "description": "Project Repository & Document Upload (up to 3 active projects, 15GB storage)",
-            "price_monthly": 0.0,  # Free trial
+            "price_quarterly": 0.0,  # Free trial
             "price_annual": 99.0,
             "storage_gb": 15,
             "project_limit": 3,
@@ -35,7 +35,7 @@ def initialize_subscription_plans():
         {
             "name": "Team Plan",
             "description": "Team Collaboration (shared project folders, concurrent editing)",
-            "price_monthly": 49.0,
+            "price_quarterly": 49.0,
             "price_annual": 499.0,
             "storage_gb": 50,
             "project_limit": 10,
@@ -56,7 +56,7 @@ def initialize_subscription_plans():
         {
             "name": "Business Plan",
             "description": "Advanced features for business teams",
-            "price_monthly": 99.0,
+            "price_quarterly": 99.0,
             "price_annual": 999.0,
             "storage_gb": 100,
             "project_limit": 20,
@@ -76,7 +76,7 @@ def initialize_subscription_plans():
         {
             "name": "Enterprise Plan",
             "description": "Enterprise-grade features for large organizations",
-            "price_monthly": 199.0,
+            "price_quarterly": 199.0,
             "price_annual": 1999.0,
             "storage_gb": 300,
             "project_limit": 50,
@@ -105,7 +105,7 @@ def initialize_subscription_plans():
                 db_manager.create_subscription_plan(
                     name=plan_data["name"],
                     description=plan_data["description"],
-                    price_monthly=plan_data["price_monthly"],
+                    price_quarterly=plan_data["price_quarterly"],
                     price_annual=plan_data["price_annual"],
                     storage_gb=plan_data["storage_gb"],
                     project_limit=plan_data["project_limit"],

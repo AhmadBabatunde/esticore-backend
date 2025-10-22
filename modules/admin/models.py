@@ -12,9 +12,7 @@ class UserStatus(str, Enum):
     SUSPENDED = "suspended"
 
 class SubscriptionInterval(str, Enum):
-    MONTHLY = "monthly"
     QUARTERLY = "quarterly"
-    BIANNUAL = "biannual"
     ANNUAL = "annual"
 
 class FeedbackType(str, Enum):
@@ -38,7 +36,7 @@ class SubscriptionPlan:
     id: Optional[int] = None
     name: str = ""
     description: str = ""
-    price_monthly: float = 0.0
+    price_quarterly: float = 0.0
     price_annual: float = 0.0
     storage_gb: int = 0
     project_limit: int = 0
@@ -59,7 +57,7 @@ class UserSubscription:
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
     is_active: bool = True
-    interval: SubscriptionInterval = SubscriptionInterval.MONTHLY
+    interval: SubscriptionInterval = SubscriptionInterval.QUARTERLY
     auto_renew: bool = True
     created_at: Optional[datetime] = None
 

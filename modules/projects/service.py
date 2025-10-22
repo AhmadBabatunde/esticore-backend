@@ -147,26 +147,68 @@ class ProjectService:
             
             document_info.append(doc_info)
         
+        # Include project members with basic user info (exclude password)
+        members = self.db.get_project_members(project_id)
+        member_info = []
+        for member in members:
+            try:
+                user = self.db.get_user_by_id(member.user_id)
+            except Exception:
+                user = None
+
+            member_entry = {
+                "user_id": member.user_id,
+                "role": member.role,
+                "joined_at": member.created_at
+            }
+
+            if user:
+                member_entry["user"] = {
+                    "id": user.id,
+                    "firstname": user.firstname,
+                    "lastname": user.lastname,
+                    "profile_image": getattr(user, 'profile_image', None)
+                }
+
+            member_info.append(member_entry)
+
+        # Include project owner/creator details (exclude password)
+        owner = None
+        try:
+            owner_user = self.db.get_user_by_id(project.user_id)
+            if owner_user:
+                owner = {
+                    "id": owner_user.id,
+                    "firstname": owner_user.firstname,
+                    "lastname": owner_user.lastname,
+                    "profile_image": getattr(owner_user, 'profile_image', None)
+                }
+        except Exception:
+            owner = None
+
         return {
             "project_id": project.project_id,
             "name": project.name,
             "description": project.description,
             "user_id": project.user_id,
+            "owner": owner,
             "documents": document_info if document_info else None,
             "created_at": project.created_at,
-            "updated_at": project.updated_at
+            "updated_at": project.updated_at,
+            "members": member_info if member_info else None
         }
     
     def get_user_projects(self, user_id: int) -> List[Dict[str, Any]]:
         """Get all projects for a user"""
         projects = self.db.get_user_projects(user_id)
-        
+        shared_projects = self.db.get_shared_projects_for_user(user_id)
+
         result = []
         for project in projects:
             # Get document information from junction table
             documents = self.db.get_project_documents(project.project_id)
             document_info = []
-            
+
             for doc in documents:
                 doc_info = {
                     "doc_id": doc.doc_id,
@@ -178,23 +220,138 @@ class ProjectService:
                 }
                 document_info.append(doc_info)
             
+            # Attach owner details
+            owner = None
+            try:
+                owner_user = self.db.get_user_by_id(project.user_id)
+                if owner_user:
+                    owner = {
+                        "id": owner_user.id,
+                        "firstname": owner_user.firstname,
+                        "lastname": owner_user.lastname,
+                        "profile_image": getattr(owner_user, 'profile_image', None),
+                    }
+            except Exception:
+                owner = None
+
             result.append({
                 "project_id": project.project_id,
                 "name": project.name,
                 "description": project.description,
                 "user_id": project.user_id,
+                "owner": owner,
                 "documents": document_info if document_info else None,
                 "created_at": project.created_at,
-                "updated_at": project.updated_at
+                "updated_at": project.updated_at,
+                "access": "owner",
             })
-        
+
+        for shared in shared_projects:
+            project = shared["project"]
+            role = shared.get("role", "member")
+
+            documents = self.db.get_project_documents(project.project_id)
+            document_info = []
+
+            for doc in documents:
+                doc_info = {
+                    "doc_id": doc.doc_id,
+                    "filename": doc.filename,
+                    "pages": doc.pages,
+                    "chunks_indexed": doc.chunks_indexed,
+                    "status": doc.status,
+                    "file_id": doc.file_id if hasattr(doc, 'file_id') else None,
+                    "storage_type": "database" if hasattr(doc, 'file_id') and doc.file_id else "filesystem"
+                }
+                document_info.append(doc_info)
+
+            result.append({
+                "project_id": project.project_id,
+                "name": project.name,
+                "description": project.description,
+                "user_id": project.user_id,
+                "owner": None,
+                "documents": document_info if document_info else None,
+                "created_at": project.created_at,
+                "updated_at": project.updated_at,
+                "access": "shared",
+                "role": role
+            })
+
+        return result
+
+    def get_shared_projects(self, user_id: int) -> List[Dict[str, Any]]:
+        """Get projects shared with the specified user"""
+        shared_projects = self.db.get_shared_projects_for_user(user_id)
+        result: List[Dict[str, Any]] = []
+
+        for shared in shared_projects:
+            project = shared["project"]
+            role = shared.get("role", "member")
+
+            documents = self.db.get_project_documents(project.project_id)
+            document_info = []
+
+            for doc in documents:
+                document_info.append({
+                    "doc_id": doc.doc_id,
+                    "filename": doc.filename,
+                    "pages": doc.pages,
+                    "status": doc.status,
+                    "file_id": getattr(doc, 'file_id', None),
+                    "storage_type": "database" if getattr(doc, 'file_id', None) else "filesystem",
+                })
+
+            owner = None
+            try:
+                owner_user = self.db.get_user_by_id(project.user_id)
+                if owner_user:
+                    owner = {
+                        "id": owner_user.id,
+                        "firstname": owner_user.firstname,
+                        "lastname": owner_user.lastname,
+                        "profile_image": getattr(owner_user, 'profile_image', None),
+                    }
+            except Exception:
+                owner = None
+
+            result.append({
+                "project_id": project.project_id,
+                "name": project.name,
+                "description": project.description,
+                "user_id": project.user_id,
+                "owner": owner,
+                "documents": document_info if document_info else None,
+                "created_at": project.created_at,
+                "updated_at": project.updated_at,
+                "access": "shared",
+                "role": role,
+            })
+
         return result
     
-    def add_document_to_project(self, project_id: str, file_content: bytes, filename: str) -> Dict[str, Any]:
+    def add_document_to_project(
+        self,
+        project_id: str,
+        file_content: bytes,
+        filename: str,
+        user_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Add a PDF document to an existing project (backward compatibility)"""
-        return self.add_documents_to_project(project_id, [file_content], [filename])
-    
-    def add_documents_to_project(self, project_id: str, file_contents: List[bytes], filenames: List[str]) -> Dict[str, Any]:
+        return self.add_documents_to_project(
+            project_id,
+            [file_content],
+            [filename],
+            user_id=user_id,
+        )
+
+    def add_documents_to_project(
+        self,
+        project_id: str,
+        file_contents: List[bytes],
+        filenames: List[str],
+        user_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Add one or more PDF documents to an existing project"""
         # Check if project exists
         project = self.db.get_project_by_id(project_id)
@@ -259,12 +416,11 @@ class ProjectService:
     
     def validate_project_access(self, project_id: str, user_id: int) -> bool:
         """Check if a user has access to a project"""
-        project = self.db.get_project_by_id(project_id)
-        return project is not None and project.user_id == user_id
+        return self.db.user_has_project_access(project_id, user_id)
     
     def delete_project(self, project_id: str, user_id: int = None, delete_shared_documents: bool = True) -> Dict[str, Any]:
         """Delete a project and its associated documents
-        
+
         Args:
             project_id: The project to delete
             user_id: User ID for ownership verification (optional)
@@ -345,6 +501,123 @@ class ProjectService:
             
         except Exception as e:
             raise ValueError(f"Failed to delete project: {str(e)}")
+
+    def share_project(self, project_id: str, inviter_id: int, invitee_email: str, role: str = "member") -> Dict[str, Any]:
+        """Invite another user to collaborate on a project"""
+        project = self.db.get_project_by_id(project_id)
+        if not project:
+            raise ValueError("Project not found")
+
+        if project.user_id != inviter_id:
+            raise ValueError("Only the project owner can share this project")
+
+        invitee = self.db.get_user_by_email(invitee_email)
+        if not invitee:
+            raise ValueError("Invitee email is not associated with an existing user")
+
+        if invitee.id == inviter_id:
+            raise ValueError("You cannot invite yourself to a project")
+
+        if self.db.user_has_project_access(project_id, invitee.id):
+            raise ValueError("User already has access to this project")
+
+        invitation_id = self.db.create_project_invitation(project_id, inviter_id, invitee.id, invitee.email, role)
+
+        metadata = {
+            "project_id": project_id,
+            "project_name": project.name,
+            "invitation_id": invitation_id,
+            "role": role,
+            "inviter_id": inviter_id
+        }
+
+        inviter = self.db.get_user_by_id(inviter_id)
+        if not inviter:
+            raise ValueError("Inviter not found")
+        title = f"Project invitation: {project.name}"
+        message = f"{inviter.firstname} {inviter.lastname} invited you to collaborate on '{project.name}'."
+        self.db.create_notification(invitee.id, title, message, "project_invitation", metadata)
+
+        from modules.auth.email_service import email_service
+        invitee_name = f"{invitee.firstname} {invitee.lastname}".strip()
+        inviter_name = f"{inviter.firstname} {inviter.lastname}".strip()
+        email_service.send_project_invitation_email(invitee.email, invitee_name or invitee.email, inviter_name or inviter.email, project.name)
+
+        return {
+            "message": "Invitation sent successfully",
+            "invitation_id": invitation_id,
+            "project_id": project_id,
+            "invitee_id": invitee.id,
+            "role": role,
+            "status": "pending"
+        }
+
+    def respond_to_invitation(self, invitation_id: int, user_id: int, accept: bool) -> Dict[str, Any]:
+        """Accept or reject a project invitation"""
+        invitation = self.db.get_project_invitation_by_id(invitation_id)
+        if not invitation:
+            raise ValueError("Invitation not found")
+
+        if invitation.invitee_id != user_id:
+            raise ValueError("You are not authorized to respond to this invitation")
+
+        if invitation.status != "pending":
+            raise ValueError("Invitation has already been responded to")
+
+        status = "accepted" if accept else "rejected"
+        self.db.update_project_invitation_status(invitation_id, status)
+
+        project = self.db.get_project_by_id(invitation.project_id)
+        inviter = self.db.get_user_by_id(invitation.inviter_id)
+        invitee = self.db.get_user_by_id(user_id)
+
+        if not project:
+            raise ValueError("Project not found")
+
+        if accept:
+            self.db.add_project_member(invitation.project_id, user_id, invitation.role)
+
+        metadata = {
+            "project_id": invitation.project_id,
+            "project_name": project.name if project else None,
+            "invitation_id": invitation_id,
+            "invitee_id": user_id,
+            "role": invitation.role,
+            "status": status
+        }
+
+        title = f"Invitation {status}"
+        invitee_name = f"{invitee.firstname} {invitee.lastname}".strip()
+        message = f"{invitee_name or invitee.email} has {status} your invitation to '{project.name}'."
+        self.db.create_notification(invitation.inviter_id, title, message, "project_invitation_update", metadata)
+
+        return {
+            "message": f"Invitation {status}",
+            "project_id": invitation.project_id,
+            "status": status,
+            "role": invitation.role
+        }
+
+    def list_user_invitations(self, user_id: int, status: Optional[str] = None) -> Dict[str, Any]:
+        """List invitations for a user"""
+        invitations = self.db.get_user_project_invitations(user_id, status)
+        formatted = []
+        for invitation in invitations:
+            project = self.db.get_project_by_id(invitation.project_id)
+            inviter = self.db.get_user_by_id(invitation.inviter_id)
+            formatted.append({
+                "invitation_id": invitation.id,
+                "project_id": invitation.project_id,
+                "project_name": project.name if project else None,
+                "inviter_id": invitation.inviter_id,
+                "inviter_name": f"{inviter.firstname} {inviter.lastname}".strip() if inviter else None,
+                "role": invitation.role,
+                "status": invitation.status,
+                "created_at": invitation.created_at,
+                "responded_at": invitation.responded_at
+            })
+
+        return {"invitations": formatted}
     
     def delete_user_projects(self, user_id: int) -> Dict[str, Any]:
         """Delete all projects for a user"""

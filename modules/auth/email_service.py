@@ -7,7 +7,7 @@ import random
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from typing import Optional
+from typing import Optional, List
 from modules.config.settings import settings
 from modules.database import db_manager
 
@@ -29,32 +29,57 @@ class EmailService:
     def generate_verification_token(self) -> str:
         """Generate a 6-digit OTP code"""
         return str(random.randint(100000, 999999))
-    
-    def send_verification_email(self, user_id: int, email: str, firstname: str) -> bool:
-        """Send email verification email to user"""
-        if not self.is_configured():
-            print("WARNING: Email service not configured - verification email not sent")
-            return False
-        
-        try:
-            # Generate 6-digit OTP code
-            otp_code = self.generate_verification_token()
-            expires_at = datetime.now() + timedelta(minutes=5)  # 5 minutes expiry
-            
-            # Store OTP in database
-            db_manager.create_verification_token(user_id, otp_code, expires_at)
-            
-            # Create email content
-            subject = "Your Verification Code - Esticore"
-            
-            # HTML email template
-            html_body = f"""
+
+    def _normalize_purpose(self, purpose: str) -> str:
+        """Normalize OTP purpose so it aligns with the authentication service"""
+        if not purpose:
+            return "email_verification"
+
+        normalized = purpose.strip().lower().replace("-", "_").replace(" ", "_")
+        compact = "".join(ch for ch in normalized if ch.isalnum())
+
+        alias_map = {
+            "email_verification": "email_verification",
+            "emailverification": "email_verification",
+            "verify_email": "email_verification",
+            "verifyemail": "email_verification",
+            "verification": "email_verification",
+            "login": "login",
+            "signin": "login",
+            "sign_in": "login",
+            "password_reset": "password_reset",
+            "passwordreset": "password_reset",
+            "reset_password": "password_reset",
+            "resetpassword": "password_reset",
+        }
+
+        if normalized in alias_map:
+            return alias_map[normalized]
+        if compact in alias_map:
+            return alias_map[compact]
+        return normalized or "email_verification"
+
+    def _compose_otp_email(
+        self,
+        firstname: str,
+        heading: str,
+        intro_text: str,
+        otp_code: str,
+        expiry_minutes: int,
+        instructions: List[str],
+        footer_note: Optional[str] = None
+    ) -> tuple[str, str]:
+        """Build HTML and text email bodies for OTP messages"""
+        instructions_html = "".join(f"<li>{step}</li>" for step in instructions)
+        footer_section = f"<p>{footer_note}</p>" if footer_note else ""
+
+        html_body = f"""
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Email Verification</title>
+    <meta charset=\"utf-8\">
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+    <title>{heading}</title>
     <style>
         body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
         .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
@@ -66,83 +91,217 @@ class EmailService:
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>Verify Your Email</h1>
-            <p>Enter the code below to complete verification</p>
+    <div class=\"container\">
+        <div class=\"header\">
+            <h1>{heading}</h1>
+            <p>Secure access with Esticore</p>
         </div>
-        <div class="content">
+        <div class=\"content\">
             <h2>Hi {firstname}!</h2>
-            <p>Thank you for signing up for Esticore. Please use the verification code below to complete your registration:</p>
-            
-            <div class="otp-code">{otp_code}</div>
-            
-            <div class="warning">
-                <strong>⚠️ Important:</strong> This verification code will expire in <strong>5 minutes</strong>.
+            <p>{intro_text}</p>
+            <div class=\"otp-code\">{otp_code}</div>
+            <div class=\"warning\">
+                <strong>⚠️ Important:</strong> This code will expire in <strong>{expiry_minutes} minutes</strong>.
             </div>
-            
-            <p><strong>How to verify:</strong></p>
-            <ol>
-                <li>Return to the Esticore application</li>
-                <li>Enter the 6-digit code above</li>
-                <li>Complete your account verification</li>
-            </ol>
-            
-            <hr style="margin: 30px 0; border: none; border-top: 1px solid #ddd;">
-            
-            <p><strong>What's next after verification?</strong></p>
-            <ul>
-                <li>Upload your floor plan documents</li>
-                <li>Use AI-powered analysis and annotation tools</li>
-                <li>Manage your projects efficiently</li>
-                <li>Access advanced document processing features</li>
-            </ul>
-            
-            <p>If you didn't create this account, you can safely ignore this email.</p>
+            <p><strong>Next steps:</strong></p>
+            <ol>{instructions_html}</ol>
+            {footer_section}
         </div>
-        <div class="footer">
+        <div class=\"footer\">
             <p>This email was sent by Esticore. If you have questions, please contact our support team.</p>
-            <p>Code expires at: {expires_at.strftime('%Y-%m-%d %H:%M:%S')}</p>
+            <p>Code expires at: {{expires_at}}</p>
         </div>
     </div>
 </body>
 </html>
-            """
-            
-            # Plain text version (fallback)
-            text_body = f"""
-Hi {firstname}!
+        """
 
-Welcome to Esticore! Please use the verification code below to complete your registration:
+        text_lines = [
+            f"Hi {firstname}!",
+            "",
+            intro_text,
+            "",
+            f"Verification Code: {otp_code}",
+            "",
+            f"This code will expire in {expiry_minutes} minutes.",
+            "",
+            "Next steps:",
+        ]
 
-Verification Code: {otp_code}
+        for idx, step in enumerate(instructions, start=1):
+            text_lines.append(f"{idx}. {step}")
 
-IMPORTANT: This code will expire in 5 minutes.
+        if footer_note:
+            text_lines.extend(["", footer_note])
 
-How to verify:
-1. Return to the Esticore application
-2. Enter the 6-digit code above
-3. Complete your account verification
+        text_lines.append("")
+        text_lines.append("Esticore Team")
 
-What's next after verification:
-- Upload your floor plan documents
-- Use AI-powered analysis and annotation tools
-- Manage your projects efficiently
-- Access advanced document processing features
+        text_body = "\n".join(text_lines)
+        return html_body, text_body
 
-If you didn't create this account, you can safely ignore this email.
+    def _send_otp_email(
+        self,
+        user_id: int,
+        email: str,
+        firstname: str,
+        purpose: str,
+        subject: str,
+        heading: str,
+        intro_text: str,
+        instructions: List[str],
+        expiry_minutes: int = 5,
+        footer_note: Optional[str] = None
+    ) -> bool:
+        """Send OTP email with shared layout"""
+        normalized_purpose = self._normalize_purpose(purpose)
+        otp_code = self.generate_verification_token()
+        expires_at = datetime.now() + timedelta(minutes=expiry_minutes)
 
----
-Esticore Team
-Code expires at: {expires_at.strftime('%Y-%m-%d %H:%M:%S')}
-            """
-            
-            # Send email
-            return self._send_email(email, subject, text_body, html_body)
-            
+        db_manager.create_verification_token(user_id, otp_code, expires_at, purpose=normalized_purpose)
+
+        if not self.is_configured():
+            print("WARNING: Email service not configured - OTP email not sent")
+            print(
+                f"DEBUG: Generated OTP {otp_code} for user {user_id} ({normalized_purpose}), "
+                f"expires at {expires_at.isoformat()}"
+            )
+            return False
+
+        html_body, text_body = self._compose_otp_email(
+            firstname=firstname,
+            heading=heading,
+            intro_text=intro_text,
+            otp_code=otp_code,
+            expiry_minutes=expiry_minutes,
+            instructions=instructions,
+            footer_note=footer_note
+        )
+
+        html_body = html_body.replace("{{expires_at}}", expires_at.strftime('%Y-%m-%d %H:%M:%S'))
+
+        return self._send_email(email, subject, text_body, html_body)
+
+    def send_verification_email(self, user_id: int, email: str, firstname: str) -> bool:
+        """Send email verification email to user"""
+        try:
+            return self._send_otp_email(
+                user_id=user_id,
+                email=email,
+                firstname=firstname,
+                purpose="email_verification",
+                subject="Your Verification Code - Esticore",
+                heading="Verify Your Email",
+                intro_text="Thank you for signing up for Esticore. Please use the verification code below to complete your registration.",
+                instructions=[
+                    "Return to the Esticore application",
+                    "Enter the 6-digit code above",
+                    "Complete your account verification"
+                ],
+                footer_note="If you didn't create this account, you can safely ignore this email."
+            )
         except Exception as e:
             print(f"ERROR: Failed to send verification email: {e}")
             return False
+
+    def send_login_otp_email(self, user_id: int, email: str, firstname: str, provider: str = "password") -> bool:
+        """Send OTP email for login confirmation"""
+        intro = "We noticed a login attempt to your Esticore account. Enter the code below to confirm it's you."
+        if provider == "google":
+            intro = "We noticed a Google sign-in attempt to your Esticore account. Enter the code below to confirm it's you."
+
+        return self._send_otp_email(
+            user_id=user_id,
+            email=email,
+            firstname=firstname,
+            purpose="login",
+            subject="Your Login Code - Esticore",
+            heading="Confirm Your Login",
+            intro_text=intro,
+            instructions=[
+                "Return to the Esticore login screen",
+                "Enter the 6-digit code",
+                "Continue to your workspace"
+            ]
+        )
+
+    def send_password_reset_email(self, user_id: int, email: str, firstname: str) -> bool:
+        """Send OTP email for password reset"""
+        return self._send_otp_email(
+            user_id=user_id,
+            email=email,
+            firstname=firstname,
+            purpose="password_reset",
+            subject="Reset Your Password - Esticore",
+            heading="Password Reset Request",
+            intro_text="A password reset was requested for your Esticore account. Use the code below to continue.",
+            instructions=[
+                "Return to the password reset screen",
+                "Enter the 6-digit code",
+                "Create a new secure password"
+            ],
+            footer_note="If you did not request this, please ignore the email."
+        )
+
+    def send_project_invitation_email(
+        self,
+        invitee_email: str,
+        invitee_name: str,
+        inviter_name: str,
+        project_name: str,
+        action_url: Optional[str] = None
+    ) -> bool:
+        """Send project invitation email"""
+        if not self.is_configured():
+            print("WARNING: Email service not configured - project invitation email not sent")
+            return False
+
+        subject = f"{inviter_name} invited you to collaborate on '{project_name}'"
+        action_button = ""
+        if action_url:
+            action_button = f"<p style=\"text-align:center;\"><a href=\"{action_url}\" style=\"display:inline-block;padding:12px 30px;background:#667eea;color:#fff;text-decoration:none;border-radius:5px;\">View invitation</a></p>"
+
+        html_body = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset=\"utf-8\">
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+    <title>Project Invitation</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+        .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 10px 10px 0 0; text-align: center; }}
+        .content {{ background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }}
+    </style>
+</head>
+<body>
+    <div class=\"container\">
+        <div class=\"header\">
+            <h1>You've been invited!</h1>
+        </div>
+        <div class=\"content\">
+            <p>Hi {invitee_name},</p>
+            <p><strong>{inviter_name}</strong> invited you to collaborate on the project <strong>{project_name}</strong> in Esticore.</p>
+            <p>You can accept or decline the invitation directly from the notifications panel inside Esticore.</p>
+            {action_button}
+            <p>If you weren't expecting this, you can safely ignore the email.</p>
+        </div>
+    </div>
+</body>
+</html>
+        """
+
+        text_body = f"""Hi {invitee_name},
+
+{inviter_name} invited you to collaborate on the project '{project_name}' in Esticore.
+You can accept or decline the invitation from the notifications panel inside Esticore.
+
+If you weren't expecting this, you can ignore this email.
+"""
+
+        return self._send_email(invitee_email, subject, text_body, html_body)
+
     
     def send_verification_success_email(self, email: str, firstname: str) -> bool:
         """Send confirmation email after successful verification"""

@@ -47,4 +47,4 @@ boto3
 python-jose[cryptography]
 
 langchain_tavily
-pyjwt
+PyJWT
